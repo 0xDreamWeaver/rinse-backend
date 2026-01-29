@@ -1,0 +1,8 @@
+/target
+/data
+/storage
+
+# Environment variables (sensitive credentials)
+.env
+.env.local
+.env.*.local

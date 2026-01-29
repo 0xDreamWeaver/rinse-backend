@@ -1,0 +1,804 @@
+   Compiling rinse-backend v0.1.0 (/Users/brocsmith/Documents/Development/17_Rinse/backend)
+warning: unused import: `std::collections::HashMap`
+ --> src/protocol/messages.rs:2:5
+  |
+2 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `mpsc`
+ --> src/protocol/client.rs:4:34
+  |
+4 | use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
+  |                                  ^^^^
+
+warning: unused import: `PeerMessage`
+ --> src/protocol/client.rs:8:38
+  |
+8 | use super::messages::{ServerMessage, PeerMessage, SearchFile};
+  |                                      ^^^^^^^^^^^
+
+warning: unused imports: `FramedRead` and `FramedWrite`
+ --> src/protocol/connection.rs:3:33
+  |
+3 | use tokio_util::codec::{Framed, FramedRead, FramedWrite};
+  |                                 ^^^^^^^^^^  ^^^^^^^^^^^
+
+warning: unused import: `MessageEncoder`
+  --> src/protocol/connection.rs:10:51
+   |
+10 | use super::messages::{ServerMessage, PeerMessage, MessageEncoder};
+   |                                                   ^^^^^^^^^^^^^^
+
+warning: unused import: `Buf`
+ --> src/protocol/codec.rs:1:13
+  |
+1 | use bytes::{Buf, BytesMut};
+  |             ^^^
+
+warning: unused import: `bail`
+ --> src/protocol/codec.rs:3:22
+  |
+3 | use anyhow::{Result, bail};
+  |                      ^^^^
+
+warning: unused import: `SqliteConnection`
+ --> src/db/mod.rs:1:32
+  |
+1 | use sqlx::{sqlite::SqlitePool, SqliteConnection, Row};
+  |                                ^^^^^^^^^^^^^^^^
+
+warning: unused import: `Context`
+ --> src/services/download.rs:4:28
+  |
+4 | use anyhow::{Result, bail, Context};
+  |                            ^^^^^^^
+
+warning: unused import: `DownloadStatus`
+ --> src/services/download.rs:7:33
+  |
+7 | use crate::models::{Item, List, DownloadStatus};
+  |                                 ^^^^^^^^^^^^^^
+
+warning: unused import: `axum::middleware::Next`
+ --> src/api/auth.rs:8:5
+  |
+8 | use axum::middleware::Next;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Query`
+ --> src/api/items.rs:2:28
+  |
+2 |     extract::{Path, State, Query},
+  |                            ^^^^^
+
+warning: unused import: `StreamExt`
+ --> src/api/ws.rs:5:29
+  |
+5 | use futures_util::{SinkExt, StreamExt};
+  |                             ^^^^^^^^^
+
+warning: unused import: `crate::models::Item`
+ --> src/api/ws.rs:9:5
+  |
+9 | use crate::models::Item;
+  |     ^^^^^^^^^^^^^^^^^^^
+
+warning: ambiguous glob re-exports
+ --> src/api/mod.rs:7:9
+  |
+7 | pub use items::*;
+  |         ^^^^^^^^ the name `BatchDeleteRequest` in the type namespace is first re-exported here
+8 | pub use lists::*;
+  |         -------- but the name `BatchDeleteRequest` in the type namespace is also re-exported here
+  |
+  = note: `#[warn(ambiguous_glob_reexports)]` on by default
+
+warning: unused import: `middleware`
+  --> src/api/mod.rs:14:5
+   |
+14 |     middleware,
+   |     ^^^^^^^^^^
+
+warning: unused variable: `user_id`
+  --> src/services/download.rs:44:63
+   |
+44 |     pub async fn search_and_download_item(&self, query: &str, user_id: i64) -> Result<Item> {
+   |                                                               ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_user_id`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `state`
+   --> src/api/auth.rs:148:11
+    |
+148 |     State(state): State<AppState>,
+    |           ^^^^^ help: if this is intentional, prefix it with an underscore: `_state`
+
+warning: unused variable: `req`
+   --> src/api/auth.rs:149:5
+    |
+149 |     req: Request,
+    |     ^^^ help: if this is intentional, prefix it with an underscore: `_req`
+
+warning: unused import: `Row`
+ --> src/db/mod.rs:1:50
+  |
+1 | use sqlx::{sqlite::SqlitePool, SqliteConnection, Row};
+  |                                                  ^^^
+
+warning: unused import: `SinkExt`
+ --> src/api/ws.rs:5:20
+  |
+5 | use futures_util::{SinkExt, StreamExt};
+  |                    ^^^^^^^
+
+warning: unused variable: `search_results`
+  --> src/protocol/client.rs:78:13
+   |
+78 |         let search_results = Arc::clone(&self.search_results);
+   |             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_search_results`
+
+warning: unused variable: `search_waiters`
+  --> src/protocol/client.rs:79:13
+   |
+79 |         let search_waiters = Arc::clone(&self.search_waiters);
+   |             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_search_waiters`
+
+warning: field `username` is never read
+  --> src/protocol/client.rs:40:5
+   |
+38 | pub struct SoulseekClient {
+   |            -------------- field in this struct
+39 |     server: Arc<ServerConnection>,
+40 |     username: String,
+   |     ^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: field `username` is never read
+   --> src/protocol/connection.rs:120:5
+    |
+118 | pub struct PeerConnection {
+    |            -------------- field in this struct
+119 |     stream: Framed<TcpStream, PeerCodec>,
+120 |     username: String,
+    |     ^^^^^^^^
+
+warning: `rinse-backend` (lib) generated 25 warnings (run `cargo fix --lib -p rinse-backend` to apply 15 suggestions)
+warning: unused import: `messages::*`
+ --> src/protocol/mod.rs:7:9
+  |
+7 | pub use messages::*;
+  |         ^^^^^^^^^^^
+
+warning: unused import: `auth::*`
+ --> src/api/mod.rs:6:9
+  |
+6 | pub use auth::*;
+  |         ^^^^^^^
+
+warning: unused import: `items::*`
+ --> src/api/mod.rs:7:9
+  |
+7 | pub use items::*;
+  |         ^^^^^^^^
+
+warning: unused import: `lists::*`
+ --> src/api/mod.rs:8:9
+  |
+8 | pub use lists::*;
+  |         ^^^^^^^^
+
+warning: unused import: `ws::*`
+ --> src/api/mod.rs:9:9
+  |
+9 | pub use ws::*;
+  |         ^^^^^
+
+warning: unused variable: `client`
+  --> tests/e2e_soulseek.rs:60:9
+   |
+60 |     let client = SoulseekClient::connect(&username, &password).await?;
+   |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_client`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `state`
+   --> src/api/auth.rs:148:11
+    |
+148 |     State(state): State<AppState>,
+    |           ^^^^^ help: if this is intentional, prefix it with an underscore: `_state`
+    |
+    = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `user_id`
+  --> src/services/download.rs:44:63
+   |
+44 |     pub async fn search_and_download_item(&self, query: &str, user_id: i64) -> Result<Item> {
+   |                                                               ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_user_id`
+
+warning: `rinse-backend` (test "e2e_soulseek") generated 1 warning
+warning: multiple variants are never constructed
+   --> src/protocol/messages.rs:12:5
+    |
+8   | pub enum ServerCode {
+    |          ---------- variants in this enum
+...
+12  |     WatchUser = 5,
+    |     ^^^^^^^^^
+13  |     UnwatchUser = 6,
+    |     ^^^^^^^^^^^
+14  |     GetUserStatus = 7,
+    |     ^^^^^^^^^^^^^
+15  |     SayChatroom = 13,
+    |     ^^^^^^^^^^^
+16  |     JoinRoom = 14,
+    |     ^^^^^^^^
+17  |     LeaveRoom = 15,
+    |     ^^^^^^^^^
+18  |     UserJoinedRoom = 16,
+    |     ^^^^^^^^^^^^^^
+19  |     UserLeftRoom = 17,
+    |     ^^^^^^^^^^^^
+...
+22  |     MessageAcked = 23,
+    |     ^^^^^^^^^^^^
+...
+26  |     SendUploadSpeed = 34,
+    |     ^^^^^^^^^^^^^^^
+...
+29  |     QueuedDownloads = 40,
+    |     ^^^^^^^^^^^^^^^
+30  |     Relogged = 41,
+    |     ^^^^^^^^
+31  |     UserSearch = 42,
+32  |     AddUser = 51,
+    |     ^^^^^^^
+33  |     GetRecommendations = 54,
+    |     ^^^^^^^^^^^^^^^^^^
+34  |     GetGlobalRecommendations = 56,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^
+35  |     GetUserInterests = 57,
+    |     ^^^^^^^^^^^^^^^^
+36  |     AdminCommand = 58,
+    |     ^^^^^^^^^^^^
+37  |     PlaceInLineResponse = 60,
+    |     ^^^^^^^^^^^^^^^^^^^
+38  |     RoomAdded = 62,
+    |     ^^^^^^^^^
+39  |     RoomRemoved = 63,
+    |     ^^^^^^^^^^^
+40  |     RoomList = 64,
+41  |     ExactFileSearch = 65,
+    |     ^^^^^^^^^^^^^^^
+42  |     AdminMessage = 66,
+    |     ^^^^^^^^^^^^
+43  |     GlobalUserList = 67,
+    |     ^^^^^^^^^^^^^^
+44  |     TunneledMessage = 68,
+    |     ^^^^^^^^^^^^^^^
+45  |     PrivilegedUsers = 69,
+    |     ^^^^^^^^^^^^^^^
+46  |     HaveNoParent = 71,
+    |     ^^^^^^^^^^^^
+47  |     SearchParent = 73,
+    |     ^^^^^^^^^^^^
+48  |     ParentMinSpeed = 83,
+    |     ^^^^^^^^^^^^^^
+49  |     ParentSpeedRatio = 84,
+    |     ^^^^^^^^^^^^^^^^
+50  |     ParentInactivityTimeout = 86,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+51  |     SearchInactivityTimeout = 87,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+52  |     MinParentsInCache = 88,
+    |     ^^^^^^^^^^^^^^^^^
+53  |     DistribAliveInterval = 90,
+    |     ^^^^^^^^^^^^^^^^^^^^
+54  |     AddToPrivileged = 91,
+    |     ^^^^^^^^^^^^^^^
+55  |     CheckPrivileges = 92,
+    |     ^^^^^^^^^^^^^^^
+56  |     EmbeddedMessage = 93,
+    |     ^^^^^^^^^^^^^^^
+57  |     AcceptChildren = 100,
+    |     ^^^^^^^^^^^^^^
+58  |     PossibleParents = 102,
+    |     ^^^^^^^^^^^^^^^
+59  |     WishlistSearch = 103,
+    |     ^^^^^^^^^^^^^^
+60  |     WishlistInterval = 104,
+    |     ^^^^^^^^^^^^^^^^
+61  |     GetSimilarUsers = 110,
+    |     ^^^^^^^^^^^^^^^
+62  |     GetItemRecommendations = 111,
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+63  |     GetItemSimilarUsers = 112,
+    |     ^^^^^^^^^^^^^^^^^^^
+64  |     RoomTickers = 113,
+    |     ^^^^^^^^^^^
+65  |     RoomTickerAdd = 114,
+    |     ^^^^^^^^^^^^^
+66  |     RoomTickerRemove = 115,
+    |     ^^^^^^^^^^^^^^^^
+67  |     SetRoomTicker = 116,
+    |     ^^^^^^^^^^^^^
+68  |     AddHatedInterest = 117,
+    |     ^^^^^^^^^^^^^^^^
+69  |     RemoveHatedInterest = 118,
+    |     ^^^^^^^^^^^^^^^^^^^
+70  |     RoomSearch = 120,
+    |     ^^^^^^^^^^
+71  |     SendUploadSpeed2 = 121,
+    |     ^^^^^^^^^^^^^^^^
+72  |     UserPrivileged = 122,
+    |     ^^^^^^^^^^^^^^
+73  |     GivePrivileges = 123,
+    |     ^^^^^^^^^^^^^^
+74  |     NotifyPrivileges = 124,
+    |     ^^^^^^^^^^^^^^^^
+75  |     AckNotifyPrivileges = 125,
+    |     ^^^^^^^^^^^^^^^^^^^
+76  |     BranchLevel = 126,
+    |     ^^^^^^^^^^^
+77  |     BranchRoot = 127,
+    |     ^^^^^^^^^^
+78  |     ChildDepth = 129,
+    |     ^^^^^^^^^^
+79  |     ResetDistributed = 130,
+    |     ^^^^^^^^^^^^^^^^
+80  |     PrivateRoomUsers = 133,
+    |     ^^^^^^^^^^^^^^^^
+81  |     PrivateRoomAddUser = 134,
+    |     ^^^^^^^^^^^^^^^^^^
+82  |     PrivateRoomRemoveUser = 135,
+    |     ^^^^^^^^^^^^^^^^^^^^^
+83  |     PrivateRoomDropMembership = 136,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+84  |     PrivateRoomDropOwnership = 137,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^
+85  |     PrivateRoomUnknown = 138,
+    |     ^^^^^^^^^^^^^^^^^^
+86  |     PrivateRoomAdded = 139,
+    |     ^^^^^^^^^^^^^^^^
+87  |     PrivateRoomRemoved = 140,
+    |     ^^^^^^^^^^^^^^^^^^
+88  |     PrivateRoomToggle = 141,
+    |     ^^^^^^^^^^^^^^^^^
+89  |     ChangePassword = 142,
+    |     ^^^^^^^^^^^^^^
+90  |     PrivateRoomAddOperator = 143,
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+91  |     PrivateRoomRemoveOperator = 144,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+92  |     PrivateRoomOperatorAdded = 145,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^
+93  |     PrivateRoomOperatorRemoved = 146,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+94  |     PrivateRoomOwned = 148,
+    |     ^^^^^^^^^^^^^^^^
+95  |     MessageUsers = 149,
+    |     ^^^^^^^^^^^^
+96  |     JoinGlobalRoom = 150,
+    |     ^^^^^^^^^^^^^^
+97  |     LeaveGlobalRoom = 151,
+    |     ^^^^^^^^^^^^^^^
+98  |     GlobalRoomMessage = 152,
+    |     ^^^^^^^^^^^^^^^^^
+99  |     RelatedSearch = 153,
+    |     ^^^^^^^^^^^^^
+100 |     CantConnectToPeer = 1001,
+    |     ^^^^^^^^^^^^^^^^^
+101 |     CantCreateRoom = 1003,
+    |     ^^^^^^^^^^^^^^
+    |
+    = note: `ServerCode` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` on by default
+
+warning: multiple variants are never constructed
+   --> src/protocol/messages.rs:108:5
+    |
+107 | pub enum PeerCode {
+    |          -------- variants in this enum
+108 |     GetSharedFileList = 4,
+    |     ^^^^^^^^^^^^^^^^^
+109 |     SharedFileList = 5,
+    |     ^^^^^^^^^^^^^^
+110 |     FileSearchRequest = 8,
+111 |     FileSearchResult = 9,
+    |     ^^^^^^^^^^^^^^^^
+112 |     UserInfoRequest = 15,
+    |     ^^^^^^^^^^^^^^^
+113 |     UserInfoReply = 16,
+    |     ^^^^^^^^^^^^^
+114 |     FolderContentsRequest = 36,
+    |     ^^^^^^^^^^^^^^^^^^^^^
+115 |     FolderContentsReply = 37,
+    |     ^^^^^^^^^^^^^^^^^^^
+116 |     TransferRequest = 40,
+117 |     TransferReply = 41,
+    |     ^^^^^^^^^^^^^
+118 |     PlaceholdUpload = 42,
+    |     ^^^^^^^^^^^^^^^
+119 |     QueueUpload = 43,
+120 |     PlaceInQueueReply = 44,
+    |     ^^^^^^^^^^^^^^^^^
+121 |     UploadFailed = 46,
+    |     ^^^^^^^^^^^^
+122 |     QueueFailed = 50,
+    |     ^^^^^^^^^^^
+123 |     PlaceInQueueRequest = 51,
+    |     ^^^^^^^^^^^^^^^^^^^
+124 |     UploadQueueNotification = 52,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `PeerCode` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `code` and `extension` are never read
+   --> src/protocol/messages.rs:137:9
+    |
+136 | pub struct SearchFile {
+    |            ---------- fields in this struct
+137 |     pub code: u8,
+    |         ^^^^
+...
+140 |     pub extension: String,
+    |         ^^^^^^^^^
+    |
+    = note: `SearchFile` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `is_vbr` is never used
+   --> src/protocol/messages.rs:160:12
+    |
+144 | impl SearchFile {
+    | --------------- method in this implementation
+...
+160 |     pub fn is_vbr(&self) -> Option<bool> {
+    |            ^^^^^^
+
+warning: fields `greeting` and `ip` are never read
+   --> src/protocol/messages.rs:179:9
+    |
+176 |     LoginResponse {
+    |     ------------- fields in this variant
+...
+179 |         greeting: Option<String>,
+    |         ^^^^^^^^
+180 |         ip: Option<String>,
+    |         ^^
+    |
+    = note: `ServerMessage` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `username` is never read
+   --> src/protocol/messages.rs:189:9
+    |
+188 |     PeerAddress {
+    |     ----------- field in this variant
+189 |         username: String,
+    |         ^^^^^^^^
+    |
+    = note: `ServerMessage` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `username`, `avg_speed`, `uploads`, `shared_files`, and `shared_folders` are never read
+   --> src/protocol/messages.rs:218:9
+    |
+217 |     UserStats {
+    |     --------- fields in this variant
+218 |         username: String,
+    |         ^^^^^^^^
+219 |         avg_speed: u32,
+    |         ^^^^^^^^^
+220 |         uploads: u64,
+    |         ^^^^^^^
+221 |         shared_files: u32,
+    |         ^^^^^^^^^^^^
+222 |         shared_folders: u32,
+    |         ^^^^^^^^^^^^^^
+    |
+    = note: `ServerMessage` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `message_id`, `timestamp`, `username`, and `message` are never read
+   --> src/protocol/messages.rs:232:9
+    |
+231 |     MessageUserReceived {
+    |     ------------------- fields in this variant
+232 |         message_id: u32,
+    |         ^^^^^^^^^^
+233 |         timestamp: u32,
+    |         ^^^^^^^^^
+234 |         username: String,
+    |         ^^^^^^^^
+235 |         message: String,
+    |         ^^^^^^^
+    |
+    = note: `ServerMessage` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: multiple variants are never constructed
+   --> src/protocol/messages.rs:182:5
+    |
+169 | pub enum ServerMessage {
+    |          ------------- variants in this enum
+...
+182 |     SetWaitPort {
+    |     ^^^^^^^^^^^
+...
+193 |     ConnectToPeer {
+    |     ^^^^^^^^^^^^^
+...
+202 |     UserSearch {
+    |     ^^^^^^^^^^
+...
+207 |     SetStatus {
+    |     ^^^^^^^^^
+...
+214 |     GetUserStats {
+    |     ^^^^^^^^^^^^
+...
+224 |     ServerPing,
+    |     ^^^^^^^^^^
+...
+227 |     MessageUser {
+    |     ^^^^^^^^^^^
+...
+237 |     RoomList,
+    |     ^^^^^^^^
+238 |     RoomListResponse {
+    |     ^^^^^^^^^^^^^^^^
+    |
+    = note: `ServerMessage` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `username`, `token`, `files`, `has_slots`, `avg_speed`, and `queue_length` are never read
+   --> src/protocol/messages.rs:258:9
+    |
+257 |     FileSearchResult {
+    |     ---------------- fields in this variant
+258 |         username: String,
+    |         ^^^^^^^^
+259 |         token: u32,
+    |         ^^^^^
+260 |         files: Vec<SearchFile>,
+    |         ^^^^^
+261 |         has_slots: bool,
+    |         ^^^^^^^^^
+262 |         avg_speed: u32,
+    |         ^^^^^^^^^
+263 |         queue_length: u64,
+    |         ^^^^^^^^^^^^
+    |
+    = note: `PeerMessage` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `token` is never read
+   --> src/protocol/messages.rs:271:9
+    |
+270 |     TransferReply {
+    |     ------------- field in this variant
+271 |         token: u32,
+    |         ^^^^^
+    |
+    = note: `PeerMessage` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `filename` and `place` are never read
+   --> src/protocol/messages.rs:279:9
+    |
+278 |     PlaceInQueueReply {
+    |     ----------------- fields in this variant
+279 |         filename: String,
+    |         ^^^^^^^^
+280 |         place: u32,
+    |         ^^^^^
+    |
+    = note: `PeerMessage` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `filename` is never read
+   --> src/protocol/messages.rs:283:9
+    |
+282 |     UploadFailed {
+    |     ------------ field in this variant
+283 |         filename: String,
+    |         ^^^^^^^^
+    |
+    = note: `PeerMessage` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: variants `GetSharedFileList`, `SharedFileList`, `FileSearchRequest`, and `QueueUpload` are never constructed
+   --> src/protocol/messages.rs:249:5
+    |
+248 | pub enum PeerMessage {
+    |          ----------- variants in this enum
+249 |     GetSharedFileList,
+    |     ^^^^^^^^^^^^^^^^^
+250 |     SharedFileList {
+    |     ^^^^^^^^^^^^^^
+...
+253 |     FileSearchRequest {
+    |     ^^^^^^^^^^^^^^^^^
+...
+275 |     QueueUpload {
+    |     ^^^^^^^^^^^
+    |
+    = note: `PeerMessage` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `has_slots`, `avg_speed`, and `queue_length` are never read
+  --> src/protocol/client.rs:15:9
+   |
+12 | pub struct SearchResult {
+   |            ------------ fields in this struct
+...
+15 |     pub has_slots: bool,
+   |         ^^^^^^^^^
+16 |     pub avg_speed: u32,
+   |         ^^^^^^^^^
+17 |     pub queue_length: u64,
+   |         ^^^^^^^^^^^^
+   |
+   = note: `SearchResult` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `filename` is never read
+  --> src/protocol/client.rs:23:9
+   |
+22 | pub struct DownloadProgress {
+   |            ---------------- field in this struct
+23 |     pub filename: String,
+   |         ^^^^^^^^
+   |
+   = note: `DownloadProgress` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `username` is never read
+  --> src/protocol/client.rs:40:5
+   |
+38 | pub struct SoulseekClient {
+   |            -------------- field in this struct
+39 |     server: Arc<ServerConnection>,
+40 |     username: String,
+   |     ^^^^^^^^
+
+warning: methods `get_download_progress`, `get_all_downloads`, and `search_and_download` are never used
+   --> src/protocol/client.rs:256:18
+    |
+51  | impl SoulseekClient {
+    | ------------------- methods in this implementation
+...
+256 |     pub async fn get_download_progress(&self, filename: &str) -> Option<DownloadProgress> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^
+...
+261 |     pub async fn get_all_downloads(&self) -> Vec<DownloadProgress> {
+    |                  ^^^^^^^^^^^^^^^^^
+...
+266 |     pub async fn search_and_download(
+    |                  ^^^^^^^^^^^^^^^^^^^
+
+warning: method `set_wait_port` is never used
+  --> src/protocol/connection.rs:86:18
+   |
+20 | impl ServerConnection {
+   | --------------------- method in this implementation
+...
+86 |     pub async fn set_wait_port(&self, port: u32) -> Result<()> {
+   |                  ^^^^^^^^^^^^^
+
+warning: method `queue_upload` is never used
+   --> src/protocol/connection.rs:173:18
+    |
+123 | impl PeerConnection {
+    | ------------------- method in this implementation
+...
+173 |     pub async fn queue_upload(&mut self, filename: &str) -> Result<u32> {
+    |                  ^^^^^^^^^^^^
+
+warning: methods `pool`, `get_user_by_id`, and `find_item_by_filename` are never used
+   --> src/db/mod.rs:31:12
+    |
+14  | impl Database {
+    | ------------- methods in this implementation
+...
+31  |     pub fn pool(&self) -> &SqlitePool {
+    |            ^^^^
+...
+69  |     pub async fn get_user_by_id(&self, id: i64) -> Result<Option<User>> {
+    |                  ^^^^^^^^^^^^^^
+...
+143 |     pub async fn find_item_by_filename(&self, filename: &str) -> Result<Option<Item>> {
+    |                  ^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `as_str` is never used
+  --> src/models/mod.rs:47:12
+   |
+46 | impl DownloadStatus {
+   | ------------------- method in this implementation
+47 |     pub fn as_str(&self) -> &str {
+   |            ^^^^^^
+
+warning: function `verify_token` is never used
+   --> src/api/auth.rs:160:8
+    |
+160 | pub fn verify_token(token: &str, secret: &str) -> Result<Claims, jsonwebtoken::errors::Error> {
+    |        ^^^^^^^^^^^^
+
+warning: methods `is_connected` and `get_list` are never used
+   --> src/services/download.rs:39:18
+    |
+19  | impl DownloadService {
+    | -------------------- methods in this implementation
+...
+39  |     pub async fn is_connected(&self) -> bool {
+    |                  ^^^^^^^^^^^^
+...
+232 |     pub async fn get_list(&self, id: i64) -> Result<Option<List>> {
+    |                  ^^^^^^^^
+
+warning: methods `is_duplicate` and `are_items_similar` are never used
+  --> src/services/fuzzy.rs:22:12
+   |
+12 | impl FuzzyMatcher {
+   | ----------------- methods in this implementation
+...
+22 |     pub fn is_duplicate(&self, query: &str, existing: &str) -> bool {
+   |            ^^^^^^^^^^^^
+...
+43 |     pub fn are_items_similar(&self, item1: &Item, item2: &Item) -> bool {
+   |            ^^^^^^^^^^^^^^^^^
+
+warning: `rinse-backend` (bin "rinse-backend") generated 53 warnings (21 duplicates) (run `cargo fix --bin "rinse-backend"` to apply 5 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.44s
+     Running tests/e2e_soulseek.rs (target/debug/deps/e2e_soulseek-283729744ef00437)
+
+running 8 tests
+test test_e2e_connection ... 
+=== E2E Test: Soulseek Connection ===
+Attempting to connect to Soulseek as 'mineman117'...
+Error: Unexpected response to login: MessageUserReceived { message_id: 7011103, timestamp: 1769590591, username: "server", message: "Your connection is restricted: You cannot search or chat. Your client version is too old. You need to upgrade to the latest version. Close this client, download new version from http://www.slsknet.org, install it and reconnect." }
+FAILED
+test test_e2e_connection_stability ... 
+=== E2E Test: Connection Stability ===
+Connecting to Soulseek...
+Error: Unexpected response to login: MessageUserReceived { message_id: 7011104, timestamp: 1769590591, username: "server", message: "Your connection is restricted: You cannot search or chat. Your client version is too old. You need to upgrade to the latest version. Close this client, download new version from http://www.slsknet.org, install it and reconnect." }
+FAILED
+test test_e2e_download_small_file ... 
+=== E2E Test: Soulseek Download (Small File) ===
+Created test directory: "/var/folders/58/w3j33vy105903zjk57k8n35c0000gn/T/rinse_e2e_test_2d7b25bf-0e4f-45d3-a224-4438510abe96"
+Connecting to Soulseek...
+Error: Unexpected response to login: MessageUserReceived { message_id: 7011105, timestamp: 1769590591, username: "server", message: "Your connection is restricted: You cannot search or chat. Your client version is too old. You need to upgrade to the latest version. Close this client, download new version from http://www.slsknet.org, install it and reconnect." }
+FAILED
+test test_e2e_multiple_searches ... 
+=== E2E Test: Multiple Concurrent Searches ===
+Connecting to Soulseek...
+Error: Unexpected response to login: MessageUserReceived { message_id: 7011106, timestamp: 1769590591, username: "server", message: "Your connection is restricted: You cannot search or chat. Your client version is too old. You need to upgrade to the latest version. Close this client, download new version from http://www.slsknet.org, install it and reconnect." }
+FAILED
+test test_e2e_progress_tracking ... 
+=== E2E Test: Download Progress Tracking ===
+Created test directory: "/var/folders/58/w3j33vy105903zjk57k8n35c0000gn/T/rinse_e2e_test_f6cbf4a3-5b0e-497f-8106-cc9599859c4a"
+Connecting to Soulseek...
+Error: Unexpected response to login: MessageUserReceived { message_id: 7011107, timestamp: 1769590592, username: "server", message: "Your connection is restricted: You cannot search or chat. Your client version is too old. You need to upgrade to the latest version. Close this client, download new version from http://www.slsknet.org, install it and reconnect." }
+FAILED
+test test_e2e_search ... 
+=== E2E Test: Soulseek Search ===
+Connecting to Soulseek...
+Error: Unexpected response to login: MessageUserReceived { message_id: 7011108, timestamp: 1769590592, username: "server", message: "Your connection is restricted: You cannot search or chat. Your client version is too old. You need to upgrade to the latest version. Close this client, download new version from http://www.slsknet.org, install it and reconnect." }
+FAILED
+test test_e2e_search_and_download_with_retry ... 
+=== E2E Test: Soulseek Search and Download with Retry ===
+Created test directory: "/var/folders/58/w3j33vy105903zjk57k8n35c0000gn/T/rinse_e2e_test_383ac091-028e-4c16-ab9a-442a81417300"
+Connecting to Soulseek...
+Error: Unexpected response to login: MessageUserReceived { message_id: 7011109, timestamp: 1769590592, username: "server", message: "Your connection is restricted: You cannot search or chat. Your client version is too old. You need to upgrade to the latest version. Close this client, download new version from http://www.slsknet.org, install it and reconnect." }
+FAILED
+test test_e2e_search_no_results ... 
+=== E2E Test: Soulseek Search (No Results) ===
+Connecting to Soulseek...
+Error: Unexpected response to login: MessageUserReceived { message_id: 7011110, timestamp: 1769590592, username: "server", message: "Your connection is restricted: You cannot search or chat. Your client version is too old. You need to upgrade to the latest version. Close this client, download new version from http://www.slsknet.org, install it and reconnect." }
+FAILED
+
+failures:
+
+failures:
+    test_e2e_connection
+    test_e2e_connection_stability
+    test_e2e_download_small_file
+    test_e2e_multiple_searches
+    test_e2e_progress_tracking
+    test_e2e_search
+    test_e2e_search_and_download_with_retry
+    test_e2e_search_no_results
+
+test result: FAILED. 0 passed; 8 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.15s
+
+error: test failed, to rerun pass `--test e2e_soulseek`

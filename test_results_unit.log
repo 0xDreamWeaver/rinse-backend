@@ -1,0 +1,192 @@
+   Compiling dotenvy v0.15.7
+   Compiling sqlx-macros-core v0.7.4
+   Compiling sqlx-macros v0.7.4
+   Compiling sqlx v0.7.4
+   Compiling rinse-backend v0.1.0 (/Users/brocsmith/Documents/Development/17_Rinse/backend)
+warning: unused import: `std::collections::HashMap`
+ --> src/protocol/messages.rs:2:5
+  |
+2 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `mpsc`
+ --> src/protocol/client.rs:4:34
+  |
+4 | use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
+  |                                  ^^^^
+
+warning: unused import: `PeerMessage`
+ --> src/protocol/client.rs:8:38
+  |
+8 | use super::messages::{ServerMessage, PeerMessage, SearchFile};
+  |                                      ^^^^^^^^^^^
+
+warning: unused imports: `FramedRead` and `FramedWrite`
+ --> src/protocol/connection.rs:3:33
+  |
+3 | use tokio_util::codec::{Framed, FramedRead, FramedWrite};
+  |                                 ^^^^^^^^^^  ^^^^^^^^^^^
+
+warning: unused import: `MessageEncoder`
+  --> src/protocol/connection.rs:10:51
+   |
+10 | use super::messages::{ServerMessage, PeerMessage, MessageEncoder};
+   |                                                   ^^^^^^^^^^^^^^
+
+warning: unused import: `Buf`
+ --> src/protocol/codec.rs:1:13
+  |
+1 | use bytes::{Buf, BytesMut};
+  |             ^^^
+
+warning: unused import: `bail`
+ --> src/protocol/codec.rs:3:22
+  |
+3 | use anyhow::{Result, bail};
+  |                      ^^^^
+
+warning: unused import: `SqliteConnection`
+ --> src/db/mod.rs:1:32
+  |
+1 | use sqlx::{sqlite::SqlitePool, SqliteConnection, Row};
+  |                                ^^^^^^^^^^^^^^^^
+
+warning: unused import: `Context`
+ --> src/services/download.rs:4:28
+  |
+4 | use anyhow::{Result, bail, Context};
+  |                            ^^^^^^^
+
+warning: unused import: `DownloadStatus`
+ --> src/services/download.rs:7:33
+  |
+7 | use crate::models::{Item, List, DownloadStatus};
+  |                                 ^^^^^^^^^^^^^^
+
+warning: unused import: `axum::middleware::Next`
+ --> src/api/auth.rs:8:5
+  |
+8 | use axum::middleware::Next;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Query`
+ --> src/api/items.rs:2:28
+  |
+2 |     extract::{Path, State, Query},
+  |                            ^^^^^
+
+warning: unused import: `StreamExt`
+ --> src/api/ws.rs:5:29
+  |
+5 | use futures_util::{SinkExt, StreamExt};
+  |                             ^^^^^^^^^
+
+warning: unused import: `crate::models::Item`
+ --> src/api/ws.rs:9:5
+  |
+9 | use crate::models::Item;
+  |     ^^^^^^^^^^^^^^^^^^^
+
+warning: ambiguous glob re-exports
+ --> src/api/mod.rs:7:9
+  |
+7 | pub use items::*;
+  |         ^^^^^^^^ the name `BatchDeleteRequest` in the type namespace is first re-exported here
+8 | pub use lists::*;
+  |         -------- but the name `BatchDeleteRequest` in the type namespace is also re-exported here
+  |
+  = note: `#[warn(ambiguous_glob_reexports)]` on by default
+
+warning: unused import: `middleware`
+  --> src/api/mod.rs:14:5
+   |
+14 |     middleware,
+   |     ^^^^^^^^^^
+
+warning: unused variable: `user_id`
+  --> src/services/download.rs:44:63
+   |
+44 |     pub async fn search_and_download_item(&self, query: &str, user_id: i64) -> Result<Item> {
+   |                                                               ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_user_id`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `state`
+   --> src/api/auth.rs:148:11
+    |
+148 |     State(state): State<AppState>,
+    |           ^^^^^ help: if this is intentional, prefix it with an underscore: `_state`
+
+warning: unused variable: `req`
+   --> src/api/auth.rs:149:5
+    |
+149 |     req: Request,
+    |     ^^^ help: if this is intentional, prefix it with an underscore: `_req`
+
+warning: unused import: `Row`
+ --> src/db/mod.rs:1:50
+  |
+1 | use sqlx::{sqlite::SqlitePool, SqliteConnection, Row};
+  |                                                  ^^^
+
+warning: unused import: `SinkExt`
+ --> src/api/ws.rs:5:20
+  |
+5 | use futures_util::{SinkExt, StreamExt};
+  |                    ^^^^^^^
+
+warning: unused variable: `search_results`
+  --> src/protocol/client.rs:78:13
+   |
+78 |         let search_results = Arc::clone(&self.search_results);
+   |             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_search_results`
+
+warning: unused variable: `search_waiters`
+  --> src/protocol/client.rs:79:13
+   |
+79 |         let search_waiters = Arc::clone(&self.search_waiters);
+   |             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_search_waiters`
+
+warning: field `username` is never read
+  --> src/protocol/client.rs:40:5
+   |
+38 | pub struct SoulseekClient {
+   |            -------------- field in this struct
+39 |     server: Arc<ServerConnection>,
+40 |     username: String,
+   |     ^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: field `username` is never read
+   --> src/protocol/connection.rs:120:5
+    |
+118 | pub struct PeerConnection {
+    |            -------------- field in this struct
+119 |     stream: Framed<TcpStream, PeerCodec>,
+120 |     username: String,
+    |     ^^^^^^^^
+
+warning: `rinse-backend` (lib test) generated 25 warnings (run `cargo fix --lib -p rinse-backend --tests` to apply 15 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.11s
+     Running unittests src/lib.rs (target/debug/deps/rinse_backend-c58faba08e186631)
+
+running 13 tests
+test db::tests::tests::test_add_item_to_list ... ok
+test db::tests::tests::test_batch_delete_items ... ok
+test db::tests::tests::test_create_and_get_item ... ok
+test db::tests::tests::test_create_and_get_list ... ok
+test db::tests::tests::test_create_and_get_user ... ok
+test db::tests::tests::test_create_duplicate_user_fails ... ok
+test db::tests::tests::test_get_all_items ... ok
+test db::tests::tests::test_get_user_lists ... ok
+test db::tests::tests::test_update_item_status ... ok
+test services::fuzzy::tests::test_are_items_similar_by_size_and_duration ... ok
+test services::fuzzy::tests::test_find_duplicate ... ok
+test services::fuzzy::tests::test_fuzzy_matching ... ok
+test services::fuzzy::tests::test_fuzzy_matching_with_variations ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
