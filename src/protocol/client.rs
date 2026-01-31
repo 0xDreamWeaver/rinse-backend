@@ -1,11 +1,35 @@
+//! Simplified Soulseek client using proven protocol logic from E2E tests.
+//!
+//! This implementation uses raw TCP streams and direct message handling,
+//! matching the working patterns from our E2E test suite.
+
 use anyhow::{Result, bail, Context};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
-use rand::Rng;
+use std::time::Duration;
+use tokio::sync::{mpsc, Mutex};
+use tokio::net::{TcpStream, TcpListener};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use bytes::{Buf, BufMut, BytesMut};
 
-use super::connection::{ServerConnection, PeerConnection, FileTransferConnection};
-use super::messages::{ServerMessage, PeerMessage, SearchFile, FileAttribute, decode_string};
+use super::messages::{SearchFile, FileAttribute, decode_string};
+use super::peer::{
+    FileConnection, IncomingConnection, handle_incoming_connection,
+    connect_to_peer_for_results, receive_search_results_from_peer,
+    queue_upload, wait_for_transfer_request,  // Modern QueueUpload method
+    NegotiationResult, ParsedSearchResponse,
+    send_message, read_message, encode_string,
+    download_file as peer_download_file,  // Working download implementation
+};
+use super::file_selection::{find_best_file, ScoredFile};
+
+/// Default port for incoming peer connections
+pub const PEER_LISTEN_PORT: u16 = 2234;
+/// Obfuscated port for incoming peer connections (PEER_LISTEN_PORT + 1)
+pub const PEER_OBFUSCATED_PORT: u16 = 2235;
+
+const SERVER_HOST: &str = "server.slsknet.org";
+const SERVER_PORT: u16 = 2242;
 
 /// Search result from the network
 #[derive(Debug, Clone)]
@@ -15,6 +39,10 @@ pub struct SearchResult {
     pub has_slots: bool,
     pub avg_speed: u32,
     pub queue_length: u64,
+    /// IP address (if known from ConnectToPeer)
+    pub peer_ip: String,
+    /// Port (if known from ConnectToPeer)
+    pub peer_port: u32,
 }
 
 /// Download progress
@@ -28,741 +56,1241 @@ pub struct DownloadProgress {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DownloadStatus {
+    Pending,
     Queued,
     InProgress,
     Completed,
     Failed(String),
 }
 
-/// Main Soulseek client
-pub struct SoulseekClient {
-    server: Arc<ServerConnection>,
-    username: String,
-    /// Token -> Search results
-    search_results: Arc<RwLock<HashMap<u32, Vec<SearchResult>>>>,
-    /// Token -> Oneshot sender for notifying search completion
-    search_waiters: Arc<Mutex<HashMap<u32, oneshot::Sender<()>>>>,
-    /// Download progress tracking
-    downloads: Arc<RwLock<HashMap<String, DownloadProgress>>>,
-    /// Active peer connections
-    peer_connections: Arc<Mutex<HashMap<String, PeerConnection>>>,
+/// Result of a download attempt
+#[derive(Debug, Clone)]
+pub enum DownloadResult {
+    /// Download completed successfully
+    Completed { bytes: u64 },
+    /// File transfer has been spawned as a background task
+    /// The transfer will complete asynchronously and update status via callback
+    TransferStarted {
+        /// Handle to wait for completion if needed
+        task_id: u64,
+    },
+    /// Download is queued at the peer - will receive F connection later
+    Queued {
+        transfer_token: u32,
+        position: Option<u32>,
+        reason: String,
+    },
+    /// Download failed
+    Failed { reason: String },
 }
 
-/// Default port for incoming peer connections
-const PEER_LISTEN_PORT: u16 = 2234;
+/// Progress callback type for reporting download progress
+/// Parameters: (downloaded_bytes, total_bytes)
+pub type ProgressCallback = Box<dyn Fn(u64, u64) + Send + Sync>;
+
+/// A pending (queued) download waiting for F connection
+#[derive(Debug, Clone)]
+pub struct PendingDownload {
+    pub username: String,
+    pub filename: String,
+    pub filesize: u64,
+    pub transfer_token: u32,
+    pub output_path: std::path::PathBuf,
+    pub queued_at: std::time::Instant,
+}
+
+/// Main Soulseek client - simplified architecture matching E2E test
+pub struct SoulseekClient {
+    /// Raw server stream
+    server_stream: TcpStream,
+    /// Our username
+    username: String,
+    /// Channel for receiving F connections from listener
+    file_conn_rx: Arc<Mutex<mpsc::Receiver<FileConnection>>>,
+    /// Sender for F connections (used by listener)
+    file_conn_tx: mpsc::Sender<FileConnection>,
+    /// Stored peer streams for download (username -> stream)
+    peer_streams: Arc<Mutex<HashMap<String, TcpStream>>>,
+    /// Incoming search results from listener (peers connecting to us)
+    incoming_results: Arc<Mutex<Vec<SearchResult>>>,
+    /// Download progress tracking
+    downloads: Arc<Mutex<HashMap<String, DownloadProgress>>>,
+    /// Pending downloads waiting for F connection (token -> PendingDownload)
+    pending_downloads: Arc<Mutex<HashMap<u32, PendingDownload>>>,
+}
 
 impl SoulseekClient {
-    /// Create a new client and connect to the server
+    /// Connect to Soulseek server and login
     pub async fn connect(username: &str, password: &str) -> Result<Self> {
-        let server = ServerConnection::connect().await?;
-        server.login(username, password).await?;
+        // Connect to server
+        let addr = format!("{}:{}", SERVER_HOST, SERVER_PORT);
+        tracing::info!("[SoulseekClient] Connecting to {}", addr);
 
-        // Set shared folders/files to 0 for now (we'll update this later)
-        server.set_shared_counts(0, 0).await?;
+        let mut stream = TcpStream::connect(&addr)
+            .await
+            .context("Failed to connect to Soulseek server")?;
 
-        // Tell server what port we listen on for peer connections
-        server.set_wait_port(PEER_LISTEN_PORT as u32).await?;
-        tracing::info!("[SoulseekClient] Set wait port to {}", PEER_LISTEN_PORT);
+        // Login
+        Self::login(&mut stream, username, password).await?;
+        tracing::info!("[SoulseekClient] Logged in as '{}'", username);
+
+        // Set shared counts (0 for now)
+        Self::set_shared_counts(&mut stream, 0, 0).await?;
+
+        // Set wait port (with obfuscated port)
+        Self::set_wait_port(&mut stream, PEER_LISTEN_PORT as u32, Some(PEER_OBFUSCATED_PORT as u32)).await?;
+        tracing::info!("[SoulseekClient] Set wait port to {} (obfuscated: {})", PEER_LISTEN_PORT, PEER_OBFUSCATED_PORT);
+
+        // Create channels
+        let (file_conn_tx, file_conn_rx) = mpsc::channel::<FileConnection>(50);
 
         let client = Self {
-            server: Arc::new(server),
+            server_stream: stream,
             username: username.to_string(),
-            search_results: Arc::new(RwLock::new(HashMap::new())),
-            search_waiters: Arc::new(Mutex::new(HashMap::new())),
-            downloads: Arc::new(RwLock::new(HashMap::new())),
-            peer_connections: Arc::new(Mutex::new(HashMap::new())),
+            file_conn_rx: Arc::new(Mutex::new(file_conn_rx)),
+            file_conn_tx,
+            peer_streams: Arc::new(Mutex::new(HashMap::new())),
+            incoming_results: Arc::new(Mutex::new(Vec::new())),
+            downloads: Arc::new(Mutex::new(HashMap::new())),
+            pending_downloads: Arc::new(Mutex::new(HashMap::new())),
         };
 
-        // Start background task to receive server messages
-        client.start_message_receiver();
-
-        // Start peer listener for incoming search results
-        client.start_peer_listener();
+        // Start listener
+        client.start_listener();
 
         Ok(client)
     }
 
-    /// Start background task to receive and process server messages
-    fn start_message_receiver(&self) {
-        let server = Arc::clone(&self.server);
-        let search_results = Arc::clone(&self.search_results);
-        let search_waiters = Arc::clone(&self.search_waiters);
+    /// Login to the server
+    async fn login(stream: &mut TcpStream, username: &str, password: &str) -> Result<()> {
+        let combined = format!("{}{}", username, password);
+        let md5_hash = format!("{:x}", md5::compute(combined.as_bytes()));
 
-        tokio::spawn(async move {
-            loop {
-                match server.receive().await {
-                    Ok(Some(msg)) => {
-                        match msg {
-                            ServerMessage::ServerPong => {
-                                // Server keep-alive
-                                tracing::trace!("[MessageReceiver] Received server pong");
-                            }
-                            ServerMessage::Relogged => {
-                                tracing::warn!("[MessageReceiver] Account logged in from another location");
-                            }
-                            ServerMessage::EmbeddedMessage { message_type, data } => {
-                                tracing::info!(
-                                    "[MessageReceiver] Received EmbeddedMessage: type={}, {} bytes",
-                                    message_type,
-                                    data.len()
-                                );
+        let mut data = BytesMut::new();
+        encode_string(&mut data, username);
+        encode_string(&mut data, password);
+        data.put_u32_le(160); // version
+        encode_string(&mut data, &md5_hash);
+        data.put_u32_le(1); // minor version
 
-                                // Type 3 = Distributed search result
-                                if message_type == 3 {
-                                    // Try to parse as search result
-                                    match Self::parse_distributed_search_result(&data) {
-                                        Ok((token, result)) => {
-                                            tracing::info!(
-                                                "[MessageReceiver] Search result from '{}': {} files (token={})",
-                                                result.username,
-                                                result.files.len(),
-                                                token
-                                            );
+        send_message(stream, 1, &data).await?;
 
-                                            // Store the result
-                                            let mut results = search_results.write().await;
-                                            if let Some(list) = results.get_mut(&token) {
-                                                list.push(result);
-                                            } else {
-                                                tracing::debug!("[MessageReceiver] No waiter for token {}", token);
-                                            }
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                "[MessageReceiver] Failed to parse search result: {}",
-                                                e
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                            ServerMessage::ConnectToPeerRequest { username, connection_type, ip, port, token, .. } => {
-                                tracing::info!(
-                                    "[MessageReceiver] ConnectToPeer request: user='{}', type='{}', addr={}:{}, token={}",
-                                    username, connection_type, ip, port, token
-                                );
+        let (code, response_data) = read_message(stream).await?;
+        if code == 1 {
+            let mut buf = BytesMut::from(&response_data[..]);
+            let success = buf.get_u8() != 0;
+            let reason = decode_string(&mut buf)?;
 
-                                // For peer connections (search results), connect to the peer
-                                // Type 'P' = Peer connection (for search results, browsing, etc.)
-                                // Type 'F' = File transfer
-                                // Type 'D' = Distributed network
-                                if connection_type == "P" {
-                                    let search_results_clone = Arc::clone(&search_results);
-                                    let username_clone = username.clone();
-                                    let ip_clone = ip.clone();
-
-                                    tokio::spawn(async move {
-                                        match Self::connect_and_receive_search_result(&ip_clone, port, &username_clone, token).await {
-                                            Ok(Some((result_token, result))) => {
-                                                tracing::info!(
-                                                    "[MessageReceiver] Got search result from '{}': {} files",
-                                                    result.username,
-                                                    result.files.len()
-                                                );
-
-                                                let mut results = search_results_clone.write().await;
-                                                if let Some(list) = results.get_mut(&result_token) {
-                                                    list.push(result);
-                                                }
-                                            }
-                                            Ok(None) => {
-                                                tracing::debug!("[MessageReceiver] No search result from peer");
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!("[MessageReceiver] Failed to get search result from peer: {}", e);
-                                            }
-                                        }
-                                    });
-                                }
-                            }
-                            ServerMessage::Unknown { code, data } => {
-                                tracing::debug!(
-                                    "[MessageReceiver] Unknown message code={} ({} bytes)",
-                                    code,
-                                    data.len()
-                                );
-                            }
-                            _ => {
-                                tracing::debug!("[MessageReceiver] Received: {:?}", msg);
-                            }
-                        }
-                    }
-                    Ok(None) => {
-                        tracing::error!("[MessageReceiver] Server connection closed");
-                        break;
-                    }
-                    Err(e) => {
-                        tracing::error!("[MessageReceiver] Error receiving from server: {}", e);
-                        break;
-                    }
-                }
+            if !success {
+                bail!("Login failed: {}", reason);
             }
-        });
-    }
-
-    /// Parse a distributed search result from embedded message data
-    fn parse_distributed_search_result(data: &[u8]) -> Result<(u32, SearchResult)> {
-        use bytes::{Buf, BytesMut};
-
-        let mut buf = BytesMut::from(data);
-
-        if buf.remaining() < 4 {
-            bail!("Not enough data for username");
         }
 
-        let username = decode_string(&mut buf)?;
-        let token = buf.get_u32_le();
-        let file_count = buf.get_u32_le();
-
-        tracing::debug!(
-            "[Protocol] Parsing search result: user='{}', token={}, files={}",
-            username,
-            token,
-            file_count
-        );
-
-        let mut files = Vec::new();
-        for i in 0..file_count {
-            if buf.remaining() < 1 {
-                tracing::warn!("[Protocol] Ran out of data at file {}/{}", i, file_count);
-                break;
-            }
-
-            let code = buf.get_u8();
-            let filename = decode_string(&mut buf)?;
-            let size = buf.get_u64_le();
-            let extension = decode_string(&mut buf)?;
-            let attr_count = buf.get_u32_le();
-
-            let mut attributes = Vec::new();
-            for _ in 0..attr_count {
-                if buf.remaining() < 8 {
-                    break;
-                }
-                let attribute_type = buf.get_u32_le();
-                let value = buf.get_u32_le();
-                attributes.push(FileAttribute { attribute_type, value });
-            }
-
-            files.push(SearchFile { code, filename, size, extension, attributes });
-        }
-
-        // Read trailing info if available
-        let has_slots = if buf.remaining() >= 1 { buf.get_u8() != 0 } else { false };
-        let avg_speed = if buf.remaining() >= 4 { buf.get_u32_le() } else { 0 };
-        let queue_length = if buf.remaining() >= 8 { buf.get_u64_le() } else { 0 };
-
-        Ok((token, SearchResult {
-            username,
-            files,
-            has_slots,
-            avg_speed,
-            queue_length,
-        }))
+        Ok(())
     }
 
-    /// Start peer listener for incoming connections (search results)
-    fn start_peer_listener(&self) {
-        let search_results = Arc::clone(&self.search_results);
+    /// Set wait port (with optional obfuscated port)
+    async fn set_wait_port(stream: &mut TcpStream, port: u32, obfuscated_port: Option<u32>) -> Result<()> {
+        let mut data = BytesMut::new();
+        data.put_u32_le(port);
+        if let Some(obfs_port) = obfuscated_port {
+            data.put_u32_le(1); // Obfuscation type: 1 = Rotated
+            data.put_u32_le(obfs_port);
+        }
+        send_message(stream, 2, &data).await?;
+        Ok(())
+    }
+
+    /// Set shared folder/file counts
+    async fn set_shared_counts(stream: &mut TcpStream, folders: u32, files: u32) -> Result<()> {
+        let mut data = BytesMut::new();
+        data.put_u32_le(folders);
+        data.put_u32_le(files);
+        send_message(stream, 35, &data).await?;
+        Ok(())
+    }
+
+    /// Send file search
+    async fn send_search(stream: &mut TcpStream, token: u32, query: &str) -> Result<()> {
+        let mut data = BytesMut::new();
+        data.put_u32_le(token);
+        encode_string(&mut data, query);
+        send_message(stream, 26, &data).await?;
+        Ok(())
+    }
+
+    /// Start listener for incoming P and F connections on both regular and obfuscated ports
+    fn start_listener(&self) {
+        // Start listener on main port (2234)
+        self.start_listener_on_port(PEER_LISTEN_PORT, false);
+        // Start listener on obfuscated port (2235)
+        self.start_listener_on_port(PEER_OBFUSCATED_PORT, true);
+    }
+
+    /// Start a listener on a specific port
+    fn start_listener_on_port(&self, port: u16, is_obfuscated: bool) {
+        let file_conn_tx = self.file_conn_tx.clone();
+        let peer_streams = Arc::clone(&self.peer_streams);
+        let incoming_results = Arc::clone(&self.incoming_results);
+        let pending_downloads = Arc::clone(&self.pending_downloads);
+        let downloads = Arc::clone(&self.downloads);
         let username = self.username.clone();
+        let port_label = if is_obfuscated { "obfuscated" } else { "main" };
 
         tokio::spawn(async move {
-            use tokio::net::TcpListener;
-
-            let addr = format!("0.0.0.0:{}", PEER_LISTEN_PORT);
+            let addr = format!("0.0.0.0:{}", port);
             let listener = match TcpListener::bind(&addr).await {
                 Ok(l) => {
-                    tracing::info!("[PeerListener] Listening for peer connections on {}", addr);
+                    tracing::info!("[Listener] Listening on {} ({} port)", addr, port_label);
                     l
                 }
                 Err(e) => {
-                    tracing::error!("[PeerListener] Failed to bind to {}: {}", addr, e);
+                    tracing::error!("[Listener] Failed to bind {} port {}: {}", port_label, port, e);
                     return;
                 }
             };
 
             loop {
                 match listener.accept().await {
-                    Ok((stream, peer_addr)) => {
-                        tracing::info!("[PeerListener] Incoming connection from {}", peer_addr);
+                    Ok((stream, addr)) => {
+                        tracing::info!("[Listener] Accepted connection from {} on {} port", addr, port_label);
 
-                        let search_results_clone = Arc::clone(&search_results);
+                        let file_conn_tx = file_conn_tx.clone();
+                        let peer_streams = Arc::clone(&peer_streams);
+                        let incoming_results = Arc::clone(&incoming_results);
+                        let pending_downloads = Arc::clone(&pending_downloads);
+                        let downloads = Arc::clone(&downloads);
                         let our_username = username.clone();
+                        let peer_addr = addr.to_string();
+                        let port_label_owned = port_label.to_string();
 
                         tokio::spawn(async move {
-                            match Self::handle_incoming_peer(stream, &our_username).await {
-                                Ok(Some((token, result))) => {
-                                    tracing::info!(
-                                        "[PeerListener] Received search result from '{}': {} files (token={})",
-                                        result.username,
-                                        result.files.len(),
-                                        token
-                                    );
+                            match handle_incoming_connection(stream, &our_username).await {
+                                Ok(IncomingConnection::File(conn)) => {
+                                    let token = conn.transfer_token;
+                                    tracing::info!("[Listener] F connection from {} ({}), token={}", addr, port_label_owned, token);
 
-                                    let mut results = search_results_clone.write().await;
-                                    if let Some(list) = results.get_mut(&token) {
-                                        list.push(result);
+                                    // Check if this matches a pending (queued) download
+                                    let pending = pending_downloads.lock().await.remove(&token);
+                                    if let Some(pending_dl) = pending {
+                                        tracing::info!("[Listener] Resuming queued download for '{}'", pending_dl.filename);
+
+                                        // Update status to in progress
+                                        {
+                                            let mut dl = downloads.lock().await;
+                                            if let Some(p) = dl.get_mut(&pending_dl.filename) {
+                                                p.status = DownloadStatus::InProgress;
+                                            }
+                                        }
+
+                                        // Process the download with progress tracking
+                                        let filename_for_progress = pending_dl.filename.clone();
+                                        let downloads_clone = Arc::clone(&downloads);
+                                        match Self::receive_file_static(conn, pending_dl.filesize, &pending_dl.output_path, &filename_for_progress, downloads_clone).await {
+                                            Ok(bytes) => {
+                                                tracing::info!("[Listener] Completed queued download: {} bytes", bytes);
+                                                let mut dl = downloads.lock().await;
+                                                if let Some(p) = dl.get_mut(&pending_dl.filename) {
+                                                    p.downloaded_bytes = bytes;
+                                                    p.status = DownloadStatus::Completed;
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tracing::error!("[Listener] Failed queued download: {}", e);
+                                                let mut dl = downloads.lock().await;
+                                                if let Some(p) = dl.get_mut(&pending_dl.filename) {
+                                                    p.status = DownloadStatus::Failed(e.to_string());
+                                                }
+                                            }
+                                        }
                                     } else {
-                                        tracing::debug!("[PeerListener] No waiter for token {}", token);
+                                        // Not a pending download, send to channel for active downloads
+                                        let _ = file_conn_tx.send(conn).await;
                                     }
                                 }
-                                Ok(None) => {
-                                    tracing::debug!("[PeerListener] Connection closed without search result");
+                                Ok(IncomingConnection::Peer(mut stream, peer_username, _token)) => {
+                                    tracing::info!("[Listener] P connection from '{}' ({}, {})", peer_username, addr, port_label_owned);
+
+                                    // Try to receive search results
+                                    match receive_search_results_from_peer(&mut stream).await {
+                                        Ok(response) => {
+                                            tracing::info!(
+                                                "[Listener] Got {} files from '{}' ({}, {:.0} KB/s)",
+                                                response.files.len(),
+                                                peer_username,
+                                                if response.slot_free { "FREE" } else { "BUSY" },
+                                                response.avg_speed as f64 / 1024.0
+                                            );
+
+                                            // Store stream for potential download
+                                            peer_streams.lock().await.insert(peer_username.clone(), stream);
+
+                                            // Store result for search aggregation
+                                            let search_result = SearchResult {
+                                                username: peer_username,
+                                                files: response.files.iter().map(|(filename, size, bitrate)| {
+                                                    SearchFile {
+                                                        code: 1,
+                                                        filename: filename.clone(),
+                                                        size: *size,
+                                                        extension: std::path::Path::new(filename)
+                                                            .extension()
+                                                            .and_then(|e| e.to_str())
+                                                            .unwrap_or("")
+                                                            .to_string(),
+                                                        attributes: bitrate.map(|b| vec![
+                                                            FileAttribute { attribute_type: 0, value: b }
+                                                        ]).unwrap_or_default(),
+                                                    }
+                                                }).collect(),
+                                                has_slots: response.slot_free,
+                                                avg_speed: response.avg_speed,
+                                                queue_length: response.queue_length as u64,
+                                                peer_ip: peer_addr.split(':').next().unwrap_or("").to_string(),
+                                                peer_port: 0, // Incoming connections - we don't know their listen port
+                                            };
+                                            incoming_results.lock().await.push(search_result);
+                                        }
+                                        Err(e) => {
+                                            tracing::debug!("[Listener] No results from '{}': {}", peer_username, e);
+                                            // Still store connection
+                                            peer_streams.lock().await.insert(peer_username, stream);
+                                        }
+                                    }
                                 }
                                 Err(e) => {
-                                    tracing::warn!("[PeerListener] Error handling peer connection: {}", e);
+                                    tracing::debug!("[Listener] Connection from {} failed handshake: {}", addr, e);
                                 }
                             }
                         });
                     }
                     Err(e) => {
-                        tracing::error!("[PeerListener] Accept error: {}", e);
+                        tracing::error!("[Listener] Accept error on {} port: {}", port_label, e);
                     }
                 }
             }
         });
     }
 
-    /// Handle an incoming peer connection
-    async fn handle_incoming_peer(
-        mut stream: tokio::net::TcpStream,
-        our_username: &str,
-    ) -> Result<Option<(u32, SearchResult)>> {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use bytes::{Buf, BytesMut};
-
-        // Read peer init message (1 byte type)
-        let init_type = stream.read_u8().await?;
-        tracing::debug!("[PeerListener] Peer init type: {}", init_type);
-
-        if init_type == 0 {
-            // PierceFirewall - read token
-            let token = stream.read_u32_le().await?;
-            tracing::debug!("[PeerListener] PierceFirewall with token {}", token);
-
-            // Now expect the peer to send FileSearchResponse
-            return Self::read_file_search_response(&mut stream).await;
-        } else if init_type == 1 {
-            // PeerInit - read username, connection type, token
-            let mut len_buf = [0u8; 4];
-            stream.read_exact(&mut len_buf).await?;
-            let username_len = u32::from_le_bytes(len_buf) as usize;
-            let mut username_buf = vec![0u8; username_len];
-            stream.read_exact(&mut username_buf).await?;
-            let peer_username = String::from_utf8_lossy(&username_buf).to_string();
-
-            stream.read_exact(&mut len_buf).await?;
-            let conn_type_len = u32::from_le_bytes(len_buf) as usize;
-            let mut conn_type_buf = vec![0u8; conn_type_len];
-            stream.read_exact(&mut conn_type_buf).await?;
-            let conn_type = String::from_utf8_lossy(&conn_type_buf).to_string();
-
-            let token = stream.read_u32_le().await?;
-
-            tracing::info!(
-                "[PeerListener] PeerInit from '{}', type='{}', token={}",
-                peer_username, conn_type, token
-            );
-
-            // Respond with our own PeerInit
-            // Format: [length:u32 LE][type:u8][username:string][conn_type:string][token:u32 LE]
-            // Length = 1 + 4 + username.len() + 4 + conn_type.len() + 4
-            let msg_len = 1 + 4 + our_username.len() + 4 + conn_type.len() + 4;
-            stream.write_u32_le(msg_len as u32).await?;
-            stream.write_u8(1).await?; // PeerInit type
-            stream.write_u32_le(our_username.len() as u32).await?;
-            stream.write_all(our_username.as_bytes()).await?;
-            stream.write_u32_le(conn_type.len() as u32).await?;
-            stream.write_all(conn_type.as_bytes()).await?;
-            stream.write_u32_le(0).await?; // token
-            stream.flush().await?;
-
-            // If connection type is "F", expect FileSearchResponse
-            if conn_type == "F" {
-                return Self::read_file_search_response(&mut stream).await;
-            }
-        }
-
-        Ok(None)
-    }
-
-    /// Connect to peer and receive search result (indirect connection via server)
-    async fn connect_and_receive_search_result(
-        ip: &str,
-        port: u16,
-        username: &str,
-        token: u32,
-    ) -> Result<Option<(u32, SearchResult)>> {
-        use tokio::net::TcpStream;
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use std::time::Duration;
-
-        let addr = format!("{}:{}", ip, port);
-        tracing::debug!("[PeerConnect] Connecting to {} at {} for search result", username, addr);
-
-        // Connect with timeout
-        let stream_result = tokio::time::timeout(
-            Duration::from_secs(5),
-            TcpStream::connect(&addr)
-        ).await;
-
-        let mut stream = match stream_result {
-            Ok(Ok(s)) => s,
-            Ok(Err(e)) => {
-                tracing::debug!("[PeerConnect] Connection to {} failed: {}", username, e);
-                return Ok(None);
-            }
-            Err(_) => {
-                tracing::debug!("[PeerConnect] Connection to {} timed out", username);
-                return Ok(None);
-            }
-        };
-
-        tracing::debug!("[PeerConnect] Connected to {}, sending PierceFirewall", username);
-
-        // Send PierceFirewall with token
-        // Format: [length:u32 LE][type:u8][token:u32 LE]
-        // Length = 5 (1 byte type + 4 bytes token)
-        stream.write_u32_le(5).await?; // Message length
-        stream.write_u8(0).await?; // PierceFirewall type
-        stream.write_u32_le(token).await?;
-        stream.flush().await?;
-
-        tracing::debug!("[PeerConnect] Sent PierceFirewall to {}, waiting for response", username);
-
-        // Read response with timeout
-        match tokio::time::timeout(
-            Duration::from_secs(10),
-            Self::read_file_search_response(&mut stream)
-        ).await {
-            Ok(result) => result,
-            Err(_) => {
-                tracing::debug!("[PeerConnect] Response from {} timed out", username);
-                Ok(None)
-            }
-        }
-    }
-
-    /// Read a FileSearchResponse from a peer stream
-    async fn read_file_search_response(
-        stream: &mut tokio::net::TcpStream,
-    ) -> Result<Option<(u32, SearchResult)>> {
-        use tokio::io::AsyncReadExt;
-        use bytes::{Buf, BytesMut};
-        use flate2::read::ZlibDecoder;
-        use std::io::Read;
-
-        // Read message length
-        let msg_len = stream.read_u32_le().await? as usize;
-
-        if msg_len == 0 || msg_len > 10_000_000 {
-            tracing::warn!("[PeerConnect] Invalid message length: {}", msg_len);
-            return Ok(None);
-        }
-
-        // Read message code
-        let code = stream.read_u32_le().await?;
-        tracing::debug!("[PeerConnect] Message code: {}, length: {}", code, msg_len);
-
-        if code != 9 {
-            // Not a FileSearchResponse
-            tracing::debug!("[PeerConnect] Not a FileSearchResponse (code={})", code);
-            return Ok(None);
-        }
-
-        // Read compressed data
-        let compressed_len = msg_len - 4; // minus the code we already read
-        let mut compressed = vec![0u8; compressed_len];
-        stream.read_exact(&mut compressed).await?;
-
-        // Decompress with zlib
-        let mut decoder = ZlibDecoder::new(&compressed[..]);
-        let mut decompressed = Vec::new();
-        decoder.read_to_end(&mut decompressed)?;
-
-        tracing::debug!(
-            "[PeerConnect] Decompressed {} bytes -> {} bytes",
-            compressed_len,
-            decompressed.len()
-        );
-
-        // Parse the decompressed data
-        Self::parse_file_search_response(&decompressed)
-    }
-
-    /// Parse FileSearchResponse data
-    fn parse_file_search_response(data: &[u8]) -> Result<Option<(u32, SearchResult)>> {
-        use bytes::{Buf, BytesMut};
-
-        let mut buf = BytesMut::from(data);
-
-        if buf.remaining() < 4 {
-            return Ok(None);
-        }
-
-        let username = decode_string(&mut buf)?;
-        let token = buf.get_u32_le();
-        let file_count = buf.get_u32_le();
-
-        tracing::debug!(
-            "[PeerConnect] FileSearchResponse: user='{}', token={}, files={}",
-            username, token, file_count
-        );
-
-        let mut files = Vec::new();
-        for _ in 0..file_count {
-            if buf.remaining() < 1 {
-                break;
-            }
-
-            let code = buf.get_u8();
-            let filename = decode_string(&mut buf)?;
-            let size = buf.get_u64_le();
-            let extension = decode_string(&mut buf)?;
-            let attr_count = buf.get_u32_le();
-
-            let mut attributes = Vec::new();
-            for _ in 0..attr_count {
-                if buf.remaining() < 8 {
-                    break;
-                }
-                let attribute_type = buf.get_u32_le();
-                let value = buf.get_u32_le();
-                attributes.push(FileAttribute { attribute_type, value });
-            }
-
-            files.push(SearchFile { code, filename, size, extension, attributes });
-        }
-
-        let has_slots = if buf.remaining() >= 1 { buf.get_u8() != 0 } else { false };
-        let avg_speed = if buf.remaining() >= 4 { buf.get_u32_le() } else { 0 };
-        let queue_length = if buf.remaining() >= 8 { buf.get_u64_le() } else { 0 };
-
-        Ok(Some((token, SearchResult {
-            username,
-            files,
-            has_slots,
-            avg_speed,
-            queue_length,
-        })))
-    }
-
-    /// Generate a unique token
-    fn generate_token() -> u32 {
-        rand::thread_rng().gen()
-    }
-
     /// Search for files on the network
-    pub async fn search(&self, query: &str, timeout_secs: u64) -> Result<Vec<SearchResult>> {
-        let token = Self::generate_token();
+    pub async fn search(&mut self, query: &str, timeout_secs: u64) -> Result<Vec<SearchResult>> {
+        let token: u32 = rand::random();
 
-        tracing::info!("[SoulseekClient] === INITIATING SEARCH ===");
+        tracing::info!("[SoulseekClient] === SEARCH ===");
         tracing::info!("[SoulseekClient] Query: '{}'", query);
         tracing::info!("[SoulseekClient] Token: {}", token);
-        tracing::info!("[SoulseekClient] Timeout: {} seconds", timeout_secs);
 
-        // Register waiter for search completion
-        let (tx, rx) = oneshot::channel();
-        self.search_waiters.lock().await.insert(token, tx);
+        // Clear previous incoming results (from listener)
+        self.incoming_results.lock().await.clear();
 
-        // Clear any previous results for this token
-        self.search_results.write().await.insert(token, Vec::new());
+        // Send search
+        Self::send_search(&mut self.server_stream, token, query).await?;
+        tracing::info!("[SoulseekClient] Search sent, waiting for results...");
 
-        // Send search request
-        tracing::debug!("[SoulseekClient] About to send file_search...");
-        self.server.file_search(token, query).await?;
-        tracing::info!("[SoulseekClient] Search request sent to server, waiting for results...");
+        // Channel for collecting results from background ConnectToPeer tasks
+        let (result_tx, mut result_rx) = mpsc::channel::<(String, String, u32, TcpStream, ParsedSearchResponse)>(50);
 
-        // Wait for results with timeout
-        tokio::select! {
-            _ = rx => {
-                tracing::info!("[SoulseekClient] Search completed via signal");
+        let mut results: Vec<SearchResult> = Vec::new();
+        let mut connect_to_peer_count = 0;
+        let start = std::time::Instant::now();
+        let timeout = Duration::from_secs(timeout_secs);
+        let min_wait = Duration::from_secs(3); // Wait at least 3 seconds for results
+        let mut last_result_time = std::time::Instant::now();
+
+        // Collect results from server ConnectToPeer messages
+        // Early exit: once we have enough results and no new ones for 2 seconds, return
+        while start.elapsed() < timeout {
+            // Early exit conditions (after minimum wait time):
+            // 1. We have at least 5 results with files AND no new results for 2 seconds
+            // 2. We have at least 10 results with files (good enough, return immediately)
+            let results_with_files = results.iter().filter(|r| !r.files.is_empty()).count();
+            if start.elapsed() > min_wait {
+                if results_with_files >= 10 {
+                    tracing::info!("[Search] Early exit: {} results with files", results_with_files);
+                    break;
+                }
+                if results_with_files >= 5 && last_result_time.elapsed() > Duration::from_secs(2) {
+                    tracing::info!("[Search] Early exit: {} results, no new results for 2s", results_with_files);
+                    break;
+                }
             }
-            _ = tokio::time::sleep(tokio::time::Duration::from_secs(timeout_secs)) => {
-                tracing::info!("[SoulseekClient] Search timeout after {} seconds", timeout_secs);
+            match tokio::time::timeout(
+                Duration::from_millis(100),
+                read_message(&mut self.server_stream)
+            ).await {
+                Ok(Ok((18, data))) => {
+                    // ConnectToPeer
+                    connect_to_peer_count += 1;
+                    let mut buf = BytesMut::from(&data[..]);
+                    let peer_username = decode_string(&mut buf)?;
+                    let conn_type = decode_string(&mut buf)?;
+                    let ip_bytes = [buf.get_u8(), buf.get_u8(), buf.get_u8(), buf.get_u8()];
+                    let ip = format!("{}.{}.{}.{}", ip_bytes[3], ip_bytes[2], ip_bytes[1], ip_bytes[0]);
+                    let port = buf.get_u32_le();
+                    let peer_token = buf.get_u32_le();
+
+                    if conn_type == "P" && connect_to_peer_count <= 150 {
+                        tracing::info!("[Search] ConnectToPeer #{}: {} at {}:{} (token={})",
+                            connect_to_peer_count, peer_username, ip, port, peer_token);
+
+                        // Spawn ConnectToPeer attempt in background so we don't block the search loop
+                        let tx = result_tx.clone();
+                        let our_username = self.username.clone();
+                        let ip_clone = ip.clone();
+                        let peer_username_clone = peer_username.clone();
+                        tokio::spawn(async move {
+                            match connect_to_peer_for_results(&ip_clone, port, &peer_username_clone, &our_username, peer_token).await {
+                                Ok((peer_stream, response)) => {
+                                    tracing::info!(
+                                        "[Search] Got {} files from '{}' ({}, {:.0} KB/s)",
+                                        response.files.len(),
+                                        peer_username_clone,
+                                        if response.slot_free { "FREE" } else { "BUSY" },
+                                        response.avg_speed as f64 / 1024.0
+                                    );
+                                    // Send result back to main task
+                                    let _ = tx.send((peer_username_clone, ip_clone, port, peer_stream, response)).await;
+                                }
+                                Err(e) => {
+                                    tracing::info!("[Search] Failed to get results from '{}': {}", peer_username_clone, e);
+                                }
+                            }
+                        });
+                    } else if conn_type == "F" {
+                        // Indirect F connection - uploader wants us to connect
+                        tracing::info!("[Search] ConnectToPeer F from '{}' at {}:{}", peer_username, ip, port);
+
+                        // Handle in background
+                        let file_tx = self.file_conn_tx.clone();
+                        let our_username = self.username.clone();
+                        tokio::spawn(async move {
+                            match super::peer::connect_for_indirect_transfer(&ip, port, peer_token, &our_username).await {
+                                Ok(conn) => {
+                                    let _ = file_tx.send(conn).await;
+                                }
+                                Err(e) => {
+                                    tracing::debug!("[Search] Indirect F failed: {}", e);
+                                }
+                            }
+                        });
+                    }
+                }
+                Ok(Ok((_code, _))) => {
+                    // Other server messages, ignore
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("[Search] Server read error: {}", e);
+                    break;
+                }
+                Err(_) => {
+                    // Timeout on server read, continue
+                }
+            }
+
+            // Check for completed ConnectToPeer results (non-blocking)
+            while let Ok((peer_username, ip, port, peer_stream, response)) = result_rx.try_recv() {
+                // Store peer stream for later download
+                self.peer_streams.lock().await.insert(peer_username.clone(), peer_stream);
+                // Convert to SearchResult
+                results.push(Self::convert_response(&peer_username, &ip, port, &response));
+                last_result_time = std::time::Instant::now();
             }
         }
 
-        // Collect results
-        let results = self.search_results.read().await
-            .get(&token)
-            .cloned()
-            .unwrap_or_default();
+        // Drop the sender so remaining tasks don't block
+        drop(result_tx);
+
+        // Collect any final results from background tasks (with short grace period)
+        let grace_end = std::time::Instant::now() + Duration::from_millis(500);
+        while std::time::Instant::now() < grace_end {
+            match tokio::time::timeout(Duration::from_millis(100), result_rx.recv()).await {
+                Ok(Some((peer_username, ip, port, peer_stream, response))) => {
+                    self.peer_streams.lock().await.insert(peer_username.clone(), peer_stream);
+                    results.push(Self::convert_response(&peer_username, &ip, port, &response));
+                }
+                _ => break,
+            }
+        }
+
+        // Collect incoming results from listener (peers that connected to us)
+        let incoming = self.incoming_results.lock().await.drain(..).collect::<Vec<_>>();
+        let incoming_count = incoming.len();
+        results.extend(incoming);
 
         tracing::info!("[SoulseekClient] === SEARCH COMPLETE ===");
-        tracing::info!("[SoulseekClient] Total results collected: {} users", results.len());
-
-        let total_files: usize = results.iter().map(|r| r.files.len()).sum();
-        tracing::info!("[SoulseekClient] Total files across all users: {}", total_files);
-
-        // Cleanup
-        self.search_waiters.lock().await.remove(&token);
-        self.search_results.write().await.remove(&token);
+        tracing::info!("[SoulseekClient] ConnectToPeer messages: {}", connect_to_peer_count);
+        tracing::info!("[SoulseekClient] Incoming connections: {}", incoming_count);
+        tracing::info!("[SoulseekClient] Total results: {} users", results.len());
+        tracing::info!("[SoulseekClient] Total files: {}", results.iter().map(|r| r.files.len()).sum::<usize>());
 
         Ok(results)
     }
 
-    /// Get the best file from search results based on bitrate
-    pub fn get_best_file(results: &[SearchResult]) -> Option<(String, SearchFile)> {
-        results.iter()
-            .flat_map(|result| {
-                result.files.iter().map(move |file| (result.username.clone(), file.clone()))
-            })
-            .max_by_key(|(_, file)| file.bitrate().unwrap_or(0))
-    }
-
-    /// Connect to a peer
-    async fn connect_to_peer(&self, username: &str) -> Result<PeerConnection> {
-        // Check if we already have a connection and remove it
-        {
-            let mut peers = self.peer_connections.lock().await;
-            if let Some(conn) = peers.remove(username) {
-                return Ok(conn);
-            }
+    /// Convert ParsedSearchResponse to SearchResult
+    fn convert_response(username: &str, ip: &str, port: u32, response: &ParsedSearchResponse) -> SearchResult {
+        SearchResult {
+            username: username.to_string(),
+            files: response.files.iter().map(|(filename, size, bitrate)| {
+                SearchFile {
+                    code: 1,
+                    filename: filename.clone(),
+                    size: *size,
+                    extension: std::path::Path::new(filename)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    attributes: bitrate.map(|b| vec![
+                        FileAttribute { attribute_type: 0, value: b }
+                    ]).unwrap_or_default(),
+                }
+            }).collect(),
+            has_slots: response.slot_free,
+            avg_speed: response.avg_speed,
+            queue_length: response.queue_length as u64,
+            peer_ip: ip.to_string(),
+            peer_port: port,
         }
-
-        // Get peer address from server
-        let (ip, port) = self.server.get_peer_address(username).await?;
-
-        // Connect to peer
-        let conn = PeerConnection::connect(&ip, port, username.to_string()).await?;
-
-        Ok(conn)
     }
 
-    /// Download a file from a peer
+    /// Download a file from a peer using the modern QueueUpload method
+    ///
+    /// Returns DownloadResult which can be:
+    /// - Completed: download finished successfully
+    /// - Queued: peer has us in queue, will initiate F connection later
+    /// - Failed: download failed
+    ///
+    /// The modern flow is:
+    /// 1. Send QueueUpload to peer on P connection
+    /// 2. Wait for peer's TransferRequest (direction=1)
+    /// 3. Send TransferReply (allowed=true) automatically
+    /// 4. Use peer::download_file to wait for F connection (via channel) and receive file
+    ///
+    /// This implementation directly copies the working test logic from e2e_search.rs
+    ///
+    /// progress_callback: Optional callback (bytes_downloaded, total_bytes, speed_kbps) for progress updates
     pub async fn download_file(
-        &self,
+        &mut self,
         username: &str,
         filename: &str,
+        filesize: u64,
+        peer_ip: &str,
+        peer_port: u32,
         output_path: &std::path::Path,
-    ) -> Result<u64> {
-        // Update download status
+        progress_callback: Option<super::peer::ProgressCallback>,
+    ) -> DownloadResult {
+        tracing::info!("[Download] Starting download from '{}'", username);
+        tracing::info!("[Download] File: {}", filename);
+        tracing::info!("[Download] Peer address hint: {}:{}", peer_ip, peer_port);
+
+        // Update status to pending
         {
-            let mut downloads = self.downloads.write().await;
+            let mut downloads = self.downloads.lock().await;
             downloads.insert(filename.to_string(), DownloadProgress {
                 filename: filename.to_string(),
-                total_bytes: 0,
+                total_bytes: filesize,
                 downloaded_bytes: 0,
-                status: DownloadStatus::Queued,
+                status: DownloadStatus::Pending,
             });
         }
 
-        // Connect to peer
-        let mut peer_conn = self.connect_to_peer(username).await
-            .context("Failed to connect to peer")?;
+        // Get stored P connection from search phase
+        // The peer connected to US during search (they can reach us via UPnP)
+        // This is critical - we can't connect to most peers due to their firewalls
+        let stored_stream = self.peer_streams.lock().await.remove(username);
 
-        let token = Self::generate_token();
+        let mut peer_stream = match stored_stream {
+            Some(stream) => {
+                tracing::info!("[Download] Using stored P connection from search");
+                stream
+            }
+            None => {
+                // No stored connection - try connecting to peer directly
+                tracing::info!("[Download] No stored P connection, attempting direct connection");
 
-        // Request transfer
-        let filesize = match peer_conn.request_transfer(token, filename).await {
-            Ok(size) => size,
-            Err(e) => {
-                // Update status to failed
-                self.downloads.write().await
-                    .get_mut(filename)
-                    .map(|p| p.status = DownloadStatus::Failed(e.to_string()));
-                return Err(e);
+                // Get peer address (from hint or from server)
+                let (final_ip, final_port) = if !peer_ip.is_empty() && peer_port > 0 {
+                    (peer_ip.to_string(), peer_port)
+                } else {
+                    match self.get_peer_address(username).await {
+                        Ok((ip, port)) if port > 0 => (ip, port),
+                        _ => {
+                            let reason = "No stored P connection and cannot get peer address".to_string();
+                            self.update_download_status(filename, DownloadStatus::Failed(reason.clone())).await;
+                            return DownloadResult::Failed { reason };
+                        }
+                    }
+                };
+
+                match self.connect_to_peer_for_download(username, &final_ip, final_port).await {
+                    Ok(stream) => {
+                        tracing::info!("[Download] Direct P connection established");
+                        stream
+                    }
+                    Err(e) => {
+                        let reason = format!("Failed to connect to peer: {}", e);
+                        self.update_download_status(filename, DownloadStatus::Failed(reason.clone())).await;
+                        return DownloadResult::Failed { reason };
+                    }
+                }
             }
         };
 
-        // Update total bytes
-        {
-            let mut downloads = self.downloads.write().await;
-            if let Some(progress) = downloads.get_mut(filename) {
-                progress.total_bytes = filesize;
-                progress.status = DownloadStatus::InProgress;
-            }
+        // MODERN METHOD: Use QueueUpload (what Nicotine+ and official clients use)
+        // Step 1: Send QueueUpload - tells peer we want to download this file
+        tracing::info!("[Download] Sending QueueUpload for '{}'...", filename);
+        if let Err(e) = queue_upload(&mut peer_stream, filename).await {
+            let reason = format!("Failed to send QueueUpload: {}", e);
+            self.update_download_status(filename, DownloadStatus::Failed(reason.clone())).await;
+            return DownloadResult::Failed { reason };
         }
 
-        // Get peer address again for file transfer connection
-        let (ip, port) = self.server.get_peer_address(username).await?;
-
-        // Open file transfer connection
-        let mut file_conn = FileTransferConnection::connect(&ip, port).await?;
-        file_conn.init(token).await?;
-
-        // Download the file
-        match file_conn.download_file(output_path).await {
-            Ok(bytes) => {
-                // Update status to completed
-                self.downloads.write().await
-                    .get_mut(filename)
-                    .map(|p| {
-                        p.downloaded_bytes = bytes;
-                        p.status = DownloadStatus::Completed;
-                    });
-                Ok(bytes)
-            }
+        // Step 2: Wait for peer to send TransferRequest (direction=1) when ready
+        // wait_for_transfer_request also sends our TransferReply (allowed=true) automatically
+        tracing::info!("[Download] Waiting for peer's TransferRequest...");
+        let negotiation = match wait_for_transfer_request(&mut peer_stream, filename, 60).await {
+            Ok(result) => result,
             Err(e) => {
-                // Update status to failed
-                self.downloads.write().await
-                    .get_mut(filename)
-                    .map(|p| p.status = DownloadStatus::Failed(e.to_string()));
-                Err(e)
+                let reason = format!("Negotiation failed: {}", e);
+                self.update_download_status(filename, DownloadStatus::Failed(reason.clone())).await;
+                return DownloadResult::Failed { reason };
+            }
+        };
+
+        // Handle the negotiation result
+        match negotiation {
+            NegotiationResult::Allowed { filesize: actual_size, transfer_token } => {
+                tracing::info!("[Download] Transfer ALLOWED: size={} bytes, token={}", actual_size, transfer_token);
+
+                // IMPORTANT: Release peer stream lock BEFORE calling peer_download_file
+                // (following the pattern from e2e_search.rs line 601)
+                drop(peer_stream);
+
+                // Update status to in progress
+                self.update_download_status(filename, DownloadStatus::InProgress).await;
+                {
+                    let mut downloads = self.downloads.lock().await;
+                    if let Some(p) = downloads.get_mut(filename) {
+                        p.total_bytes = actual_size;
+                    }
+                }
+
+                // Get peer address - either from hint or request from server
+                // (following e2e_search.rs lines 604-616)
+                let (final_ip, final_port) = if peer_ip.is_empty() || peer_port == 0 {
+                    tracing::info!("[Download] No peer address cached, requesting from server...");
+                    match self.get_peer_address(username).await {
+                        Ok((ip, port)) => (ip, port),
+                        Err(e) => {
+                            tracing::warn!("[Download] Could not get peer address: {} - continuing with empty", e);
+                            (String::new(), 0)
+                        }
+                    }
+                } else {
+                    (peer_ip.to_string(), peer_port)
+                };
+
+                // Step 3: Use peer::download_file to wait for F connection and receive file
+                // This is the WORKING implementation from the test
+                tracing::info!("[Download] Calling peer_download_file (token={})...", transfer_token);
+
+                // Get mutable access to the file connection receiver
+                let mut file_conn_rx = self.file_conn_rx.lock().await;
+
+                match peer_download_file(
+                    &mut self.server_stream,
+                    &final_ip,
+                    final_port,
+                    username,
+                    &self.username,
+                    filename,
+                    actual_size,
+                    transfer_token,
+                    &mut file_conn_rx,
+                    output_path,
+                    progress_callback,
+                ).await {
+                    Ok(bytes) => {
+                        self.update_download_status(filename, DownloadStatus::Completed).await;
+                        {
+                            let mut downloads = self.downloads.lock().await;
+                            if let Some(p) = downloads.get_mut(filename) {
+                                p.downloaded_bytes = bytes;
+                            }
+                        }
+                        tracing::info!("[Download] COMPLETE: {} bytes downloaded", bytes);
+                        DownloadResult::Completed { bytes }
+                    }
+                    Err(e) => {
+                        let reason = format!("File transfer failed: {}", e);
+                        self.update_download_status(filename, DownloadStatus::Failed(reason.clone())).await;
+                        DownloadResult::Failed { reason }
+                    }
+                }
+            }
+
+            NegotiationResult::Queued { transfer_token, position, reason } => {
+                tracing::info!("[Download] QUEUED: {} (position: {:?})", reason, position);
+
+                // Update status to queued
+                self.update_download_status(filename, DownloadStatus::Queued).await;
+
+                // Store as pending download - listener will handle F connection later
+                {
+                    let mut pending = self.pending_downloads.lock().await;
+                    pending.insert(transfer_token, PendingDownload {
+                        username: username.to_string(),
+                        filename: filename.to_string(),
+                        filesize,
+                        transfer_token,
+                        output_path: output_path.to_path_buf(),
+                        queued_at: std::time::Instant::now(),
+                    });
+                }
+
+                DownloadResult::Queued { transfer_token, position, reason }
+            }
+
+            NegotiationResult::Denied { reason } => {
+                tracing::info!("[Download] DENIED: {}", reason);
+                self.update_download_status(filename, DownloadStatus::Failed(reason.clone())).await;
+                DownloadResult::Failed { reason }
             }
         }
     }
 
-    /// Get download progress for a file
-    pub async fn get_download_progress(&self, filename: &str) -> Option<DownloadProgress> {
-        self.downloads.read().await.get(filename).cloned()
+    /// Helper to update download status
+    async fn update_download_status(&self, filename: &str, status: DownloadStatus) {
+        let mut downloads = self.downloads.lock().await;
+        if let Some(p) = downloads.get_mut(filename) {
+            p.status = status;
+        }
     }
 
-    /// Get all download progress
-    pub async fn get_all_downloads(&self) -> Vec<DownloadProgress> {
-        self.downloads.read().await.values().cloned().collect()
+    /// Connect to peer for download negotiation
+    /// If we have the peer's address, connect directly
+    /// Otherwise, request their address from the server
+    async fn connect_to_peer_for_download(
+        &mut self,
+        username: &str,
+        peer_ip: &str,
+        peer_port: u32,
+    ) -> Result<TcpStream> {
+        // If we have a valid peer address, connect directly
+        if peer_port > 0 && !peer_ip.is_empty() && peer_ip != "0.0.0.0" {
+            tracing::info!("[Download] Connecting directly to {}:{}", peer_ip, peer_port);
+            let addr = format!("{}:{}", peer_ip, peer_port);
+            let stream = tokio::time::timeout(
+                Duration::from_secs(10),
+                TcpStream::connect(&addr)
+            ).await
+                .context("Connection timeout")?
+                .context("Connection failed")?;
+
+            // Send PeerInit
+            let mut stream = stream;
+            super::peer::send_peer_init(&mut stream, &self.username, "P", 0).await?;
+
+            return Ok(stream);
+        }
+
+        // No direct address - request from server
+        tracing::info!("[Download] Requesting peer address from server for '{}'", username);
+
+        // Send GetPeerAddress request
+        let mut request = BytesMut::new();
+        request.put_u32_le(3); // GetPeerAddress code
+        super::peer::encode_string(&mut request, username);
+
+        let msg_len = request.len() as u32;
+        self.server_stream.write_u32_le(msg_len).await?;
+        self.server_stream.write_all(&request).await?;
+        self.server_stream.flush().await?;
+
+        // Wait for PeerAddress response
+        let start = std::time::Instant::now();
+        let timeout = Duration::from_secs(10);
+
+        while start.elapsed() < timeout {
+            match tokio::time::timeout(
+                Duration::from_millis(200),
+                read_message(&mut self.server_stream)
+            ).await {
+                Ok(Ok((3, data))) => {
+                    // PeerAddress response
+                    // Format: username (string), IP (4 bytes network order), port (u32 LE)
+                    let mut buf = BytesMut::from(&data[..]);
+                    let resp_username = decode_string(&mut buf)?;
+
+                    // IP is 4 bytes in network byte order (big-endian)
+                    if buf.remaining() < 8 {
+                        tracing::warn!("[Download] Invalid PeerAddress response - not enough bytes");
+                        continue;
+                    }
+                    let ip_bytes = [buf.get_u8(), buf.get_u8(), buf.get_u8(), buf.get_u8()];
+                    let ip = format!("{}.{}.{}.{}", ip_bytes[3], ip_bytes[2], ip_bytes[1], ip_bytes[0]);
+                    let port = buf.get_u32_le();
+
+                    if resp_username.to_lowercase() == username.to_lowercase() {
+                        tracing::info!("[Download] Got peer address: {}:{}", ip, port);
+
+                        if port == 0 || ip.is_empty() {
+                            bail!("Peer address not available (port={})", port);
+                        }
+
+                        // Connect to peer
+                        let addr = format!("{}:{}", ip, port);
+                        let stream = tokio::time::timeout(
+                            Duration::from_secs(10),
+                            TcpStream::connect(&addr)
+                        ).await
+                            .context("Connection timeout")?
+                            .context("Connection failed")?;
+
+                        // Send PeerInit
+                        let mut stream = stream;
+                        super::peer::send_peer_init(&mut stream, &self.username, "P", 0).await?;
+
+                        return Ok(stream);
+                    }
+                }
+                Ok(Ok((18, data))) => {
+                    // ConnectToPeer - might be the server telling us to connect
+                    let mut buf = BytesMut::from(&data[..]);
+                    let peer_username = decode_string(&mut buf)?;
+                    let conn_type = decode_string(&mut buf)?;
+                    let ip_bytes = [buf.get_u8(), buf.get_u8(), buf.get_u8(), buf.get_u8()];
+                    let ip = format!("{}.{}.{}.{}", ip_bytes[3], ip_bytes[2], ip_bytes[1], ip_bytes[0]);
+                    let port = buf.get_u32_le();
+                    let peer_token = buf.get_u32_le();
+
+                    if peer_username.to_lowercase() == username.to_lowercase() && conn_type == "P" {
+                        tracing::info!("[Download] ConnectToPeer received: {}:{}", ip, port);
+
+                        // Connect using ConnectToPeer info
+                        match super::peer::connect_to_peer_for_results(&ip, port, &peer_username, &self.username, peer_token).await {
+                            Ok((stream, _)) => return Ok(stream),
+                            Err(e) => {
+                                tracing::warn!("[Download] ConnectToPeer connect failed: {}", e);
+                                // Continue waiting
+                            }
+                        }
+                    }
+                }
+                Ok(Ok(_)) => {
+                    // Other message, ignore
+                }
+                Ok(Err(e)) => {
+                    bail!("Server error: {}", e);
+                }
+                Err(_) => {
+                    // Timeout, continue
+                }
+            }
+        }
+
+        bail!("Timeout waiting for peer address")
     }
 
-    /// Search and download best file
-    pub async fn search_and_download(
+    /// Wait for F connection - monitors both listener channel and server stream
+    async fn wait_for_f_connection(
+        &mut self,
+        peer_username: &str,
+        peer_ip: &str,
+        peer_port: u32,
+        transfer_token: u32,
+        timeout: Duration,
+    ) -> Result<FileConnection> {
+        let start = std::time::Instant::now();
+
+        // Phase 1: Wait for direct F connection from listener OR ConnectToPeer F from server
+        while start.elapsed() < timeout {
+            tokio::select! {
+                // Check for direct F connection from listener
+                result = async {
+                    let mut rx = self.file_conn_rx.lock().await;
+                    tokio::time::timeout(Duration::from_millis(100), rx.recv()).await
+                } => {
+                    if let Ok(Some(conn)) = result {
+                        if conn.transfer_token == transfer_token {
+                            tracing::info!("[Download] Got direct F connection");
+                            return Ok(conn);
+                        } else {
+                            tracing::debug!("[Download] Token mismatch: expected {}, got {}",
+                                transfer_token, conn.transfer_token);
+                        }
+                    }
+                }
+
+                // Check server for ConnectToPeer F message (indirect path)
+                result = tokio::time::timeout(
+                    Duration::from_millis(100),
+                    read_message(&mut self.server_stream)
+                ) => {
+                    match result {
+                        Ok(Ok((18, data))) => {
+                            // ConnectToPeer message
+                            let mut buf = BytesMut::from(&data[..]);
+                            let username = decode_string(&mut buf)?;
+                            let conn_type = decode_string(&mut buf)?;
+                            let ip_bytes = [buf.get_u8(), buf.get_u8(), buf.get_u8(), buf.get_u8()];
+                            let ip = format!("{}.{}.{}.{}", ip_bytes[3], ip_bytes[2], ip_bytes[1], ip_bytes[0]);
+                            let port = buf.get_u32_le();
+                            let indirect_token = buf.get_u32_le();
+
+                            if conn_type == "F" && username == peer_username {
+                                tracing::info!("[Download] ConnectToPeer F - connecting to {}:{}", ip, port);
+                                match super::peer::connect_for_indirect_transfer(&ip, port, indirect_token, &self.username).await {
+                                    Ok(conn) => return Ok(conn),
+                                    Err(e) => tracing::warn!("[Download] Indirect F failed: {}", e),
+                                }
+                            } else if conn_type == "P" {
+                                // Peer search connection during download - ignore
+                                tracing::debug!("[Download] Ignoring P connection from {}", username);
+                            }
+                        }
+                        Ok(Ok((code, _))) => {
+                            tracing::trace!("[Download] Ignoring server message {}", code);
+                        }
+                        Ok(Err(e)) => {
+                            tracing::warn!("[Download] Server read error: {}", e);
+                        }
+                        Err(_) => {
+                            // Timeout, continue loop
+                        }
+                    }
+                }
+            }
+        }
+
+        // Phase 2: Fallback - try proactive F connection to peer
+        // If we have their address, connect directly
+        if !peer_ip.is_empty() && peer_port > 0 {
+            tracing::info!("[Download] Trying proactive F connection to {}:{}", peer_ip, peer_port);
+            return self.proactive_f_connection(peer_ip, peer_port, transfer_token).await;
+        }
+
+        // If we don't have their port, request it from server
+        tracing::info!("[Download] Requesting peer address for proactive F connection...");
+        if let Ok((ip, port)) = self.get_peer_address(peer_username).await {
+            if port > 0 {
+                tracing::info!("[Download] Got address {}:{}, trying proactive F connection", ip, port);
+                return self.proactive_f_connection(&ip, port, transfer_token).await;
+            }
+        }
+
+        bail!("Timeout waiting for F connection (peer address not available)")
+    }
+
+    /// Request peer's address from server
+    async fn get_peer_address(&mut self, username: &str) -> Result<(String, u32)> {
+        // Send GetPeerAddress request (code 3)
+        let mut request = BytesMut::new();
+        request.put_u32_le(3); // GetPeerAddress code
+        encode_string(&mut request, username);
+
+        let msg_len = request.len() as u32;
+        self.server_stream.write_u32_le(msg_len).await?;
+        self.server_stream.write_all(&request).await?;
+        self.server_stream.flush().await?;
+
+        // Wait for PeerAddress response (code 3)
+        let timeout = Duration::from_secs(10);
+        let start = std::time::Instant::now();
+
+        while start.elapsed() < timeout {
+            match tokio::time::timeout(
+                Duration::from_millis(200),
+                read_message(&mut self.server_stream)
+            ).await {
+                Ok(Ok((3, data))) => {
+                    // PeerAddress response
+                    // Format: username (string), IP (4 bytes network order), port (u32 LE)
+                    let mut buf = BytesMut::from(&data[..]);
+                    let resp_username = decode_string(&mut buf)?;
+
+                    // IP is 4 bytes in network byte order (big-endian)
+                    if buf.remaining() < 8 {
+                        tracing::warn!("[Download] Invalid PeerAddress response - not enough bytes");
+                        continue;
+                    }
+                    let ip_bytes = [buf.get_u8(), buf.get_u8(), buf.get_u8(), buf.get_u8()];
+                    let ip = format!("{}.{}.{}.{}", ip_bytes[3], ip_bytes[2], ip_bytes[1], ip_bytes[0]);
+                    let port = buf.get_u32_le();
+
+                    if resp_username.to_lowercase() == username.to_lowercase() {
+                        tracing::info!("[Download] GetPeerAddress response: {}:{}", ip, port);
+                        return Ok((ip, port));
+                    }
+                }
+                Ok(Ok(_)) => {
+                    // Other message, continue
+                }
+                Ok(Err(e)) => {
+                    bail!("Server error: {}", e);
+                }
+                Err(_) => {
+                    // Timeout, continue
+                }
+            }
+        }
+
+        bail!("Timeout getting peer address")
+    }
+
+    /// Try proactive F connection to peer (fallback when they can't connect to us)
+    async fn proactive_f_connection(
         &self,
+        peer_ip: &str,
+        peer_port: u32,
+        transfer_token: u32,
+    ) -> Result<FileConnection> {
+        let addr = format!("{}:{}", peer_ip, peer_port);
+        let mut stream = tokio::time::timeout(
+            Duration::from_secs(10),
+            TcpStream::connect(&addr)
+        ).await
+            .context("Connection timeout")?
+            .context("Connection failed")?;
+
+        tracing::debug!("[Download] Connected, sending PeerInit type F");
+
+        // Send PeerInit with type F
+        let mut data = BytesMut::new();
+        encode_string(&mut data, &self.username);
+        encode_string(&mut data, "F");
+        data.put_u32_le(0); // token 0 for F connection
+
+        let msg_len = 1 + data.len() as u32;
+        stream.write_u32_le(msg_len).await?;
+        stream.write_u8(1).await?; // PeerInit message type
+        stream.write_all(&data).await?;
+        stream.flush().await?;
+
+        // Wait for peer's response
+        match tokio::time::timeout(Duration::from_secs(5), stream.read_u32_le()).await {
+            Ok(Ok(msg_len)) => {
+                if msg_len > 5 && msg_len < 200 {
+                    let msg_type = stream.read_u8().await?;
+                    if msg_type == 1 {
+                        let remaining = (msg_len - 1) as usize;
+                        let mut data = vec![0u8; remaining];
+                        stream.read_exact(&mut data).await?;
+                        tracing::debug!("[Download] Got PeerInit response");
+                    }
+                }
+            }
+            _ => tracing::debug!("[Download] No PeerInit response, continuing"),
+        }
+
+        // Send FileTransferInit with transfer token
+        tracing::debug!("[Download] Sending FileTransferInit token={}", transfer_token);
+        stream.write_u32_le(transfer_token).await?;
+        stream.flush().await?;
+
+        Ok(FileConnection { stream, transfer_token })
+    }
+
+    /// Receive file data from F connection
+    async fn receive_file(
+        &self,
+        mut conn: FileConnection,
+        filesize: u64,
+        output_path: &std::path::Path,
+        filename: &str,  // For progress tracking
+    ) -> Result<u64> {
+        // Send FileOffset (start from 0)
+        conn.stream.write_u64_le(0).await?;
+        conn.stream.flush().await?;
+
+        // Create output directory
+        if let Some(parent) = output_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        let mut file = tokio::fs::File::create(output_path).await?;
+        let mut total = 0u64;
+        let mut buffer = vec![0u8; 65536];
+        let start = std::time::Instant::now();
+        let mut last_update = 0u64;
+
+        loop {
+            match tokio::time::timeout(Duration::from_secs(30), conn.stream.read(&mut buffer)).await {
+                Ok(Ok(0)) => break,
+                Ok(Ok(n)) => {
+                    tokio::io::AsyncWriteExt::write_all(&mut file, &buffer[..n]).await?;
+                    total += n as u64;
+
+                    // Update progress every 100KB (for real-time WebSocket updates)
+                    if total - last_update >= 102400 {
+                        last_update = total;
+                        let mut downloads = self.downloads.lock().await;
+                        if let Some(p) = downloads.get_mut(filename) {
+                            p.downloaded_bytes = total;
+                        }
+                    }
+
+                    // Log progress every MB
+                    if total % (1024 * 1024) < 65536 {
+                        let elapsed = start.elapsed().as_secs_f64();
+                        let speed = if elapsed > 0.0 { total as f64 / elapsed / 1024.0 } else { 0.0 };
+                        tracing::info!(
+                            "[Download] {:.2}/{:.2} MB ({:.1}%) - {:.1} KB/s",
+                            total as f64 / 1_048_576.0,
+                            filesize as f64 / 1_048_576.0,
+                            (total as f64 / filesize as f64) * 100.0,
+                            speed
+                        );
+                    }
+
+                    if total >= filesize {
+                        break;
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("[Download] Read error: {}", e);
+                    break;
+                }
+                Err(_) => {
+                    tracing::warn!("[Download] Timeout");
+                    break;
+                }
+            }
+        }
+
+        tokio::io::AsyncWriteExt::flush(&mut file).await?;
+        tracing::info!("[Download] Complete: {} bytes to {:?}", total, output_path);
+
+        Ok(total)
+    }
+
+    /// Static version of receive_file for use in spawned tasks
+    async fn receive_file_static(
+        mut conn: FileConnection,
+        filesize: u64,
+        output_path: &std::path::Path,
+        filename: &str,
+        downloads: Arc<Mutex<HashMap<String, DownloadProgress>>>,
+    ) -> Result<u64> {
+        // Send FileOffset (start from 0)
+        conn.stream.write_u64_le(0).await?;
+        conn.stream.flush().await?;
+
+        // Create output directory
+        if let Some(parent) = output_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        let mut file = tokio::fs::File::create(output_path).await?;
+        let mut total = 0u64;
+        let mut buffer = vec![0u8; 65536];
+        let start = std::time::Instant::now();
+        let mut last_update = 0u64;
+
+        loop {
+            match tokio::time::timeout(Duration::from_secs(30), conn.stream.read(&mut buffer)).await {
+                Ok(Ok(0)) => break,
+                Ok(Ok(n)) => {
+                    tokio::io::AsyncWriteExt::write_all(&mut file, &buffer[..n]).await?;
+                    total += n as u64;
+
+                    // Update progress every 100KB (for real-time WebSocket updates)
+                    if total - last_update >= 102400 {
+                        last_update = total;
+                        let mut dl = downloads.lock().await;
+                        if let Some(p) = dl.get_mut(filename) {
+                            p.downloaded_bytes = total;
+                        }
+                    }
+
+                    // Log progress every MB
+                    if total % (1024 * 1024) < 65536 {
+                        let elapsed = start.elapsed().as_secs_f64();
+                        let speed = if elapsed > 0.0 { total as f64 / elapsed / 1024.0 } else { 0.0 };
+                        tracing::info!(
+                            "[Queued Download] {:.2}/{:.2} MB ({:.1}%) - {:.1} KB/s",
+                            total as f64 / 1_048_576.0,
+                            filesize as f64 / 1_048_576.0,
+                            (total as f64 / filesize as f64) * 100.0,
+                            speed
+                        );
+                    }
+
+                    if total >= filesize {
+                        break;
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("[Queued Download] Read error: {}", e);
+                    break;
+                }
+                Err(_) => {
+                    tracing::warn!("[Queued Download] Timeout");
+                    break;
+                }
+            }
+        }
+
+        tokio::io::AsyncWriteExt::flush(&mut file).await?;
+        tracing::info!("[Queued Download] Complete: {} bytes to {:?}", total, output_path);
+
+        Ok(total)
+    }
+
+    /// Get download progress
+    pub async fn get_download_progress(&self, filename: &str) -> Option<DownloadProgress> {
+        self.downloads.lock().await.get(filename).cloned()
+    }
+
+    /// Get all downloads
+    pub async fn get_all_downloads(&self) -> Vec<DownloadProgress> {
+        self.downloads.lock().await.values().cloned().collect()
+    }
+
+    /// Get the best file from search results using sophisticated scoring
+    /// Returns ScoredFile with username, filename, size, bitrate, score, peer_ip, peer_port
+    /// format_filter: Optional format filter ("mp3", "flac", "m4a", "wav")
+    pub fn get_best_file(results: &[SearchResult], query: &str, format_filter: Option<&str>) -> Option<ScoredFile> {
+        find_best_file(results, query, format_filter)
+    }
+
+    /// Search and download best matching file
+    /// Search and download - returns (ScoredFile, DownloadResult)
+    pub async fn search_and_download(
+        &mut self,
         query: &str,
         output_path: &std::path::Path,
-    ) -> Result<(String, u64)> {
-        // Search for the file
-        let results = self.search(query, 30).await?;
+    ) -> Result<(ScoredFile, DownloadResult)> {
+        // Search
+        let results = self.search(query, 10).await?;
 
         if results.is_empty() {
             bail!("No results found for query: {}", query);
         }
 
-        // Get best file
-        let (username, file) = Self::get_best_file(&results)
-            .ok_or_else(|| anyhow::anyhow!("No suitable files found"))?;
+        // Find best file using sophisticated scoring (no format filter for this internal method)
+        let scored_file = Self::get_best_file(&results, query, None)
+            .ok_or_else(|| anyhow::anyhow!("No suitable files found matching query"))?;
 
         tracing::info!(
-            "Selected file '{}' from user '{}' (bitrate: {:?})",
-            file.filename,
-            username,
-            file.bitrate()
+            "[SoulseekClient] Selected '{}' from '{}' (score={:.1}, {:?} kbps)",
+            scored_file.filename,
+            scored_file.username,
+            scored_file.score,
+            scored_file.bitrate
         );
 
-        // Attempt to download
-        match self.download_file(&username, &file.filename, output_path).await {
-            Ok(bytes) => Ok((file.filename, bytes)),
-            Err(e) => {
-                tracing::warn!("First download attempt failed: {}. Trying next best file...", e);
+        // Download
+        let result = self.download_file(
+            &scored_file.username,
+            &scored_file.filename,
+            scored_file.size,
+            &scored_file.peer_ip,
+            scored_file.peer_port,
+            output_path,
+            None,  // No progress callback for this internal method
+        ).await;
 
-                // Try next best file
-                let remaining_results: Vec<_> = results.iter()
-                    .filter(|r| r.username != username)
-                    .cloned()
-                    .collect();
-
-                if let Some((username2, file2)) = Self::get_best_file(&remaining_results) {
-                    tracing::info!(
-                        "Retrying with file '{}' from user '{}'",
-                        file2.filename,
-                        username2
-                    );
-
-                    self.download_file(&username2, &file2.filename, output_path).await
-                        .map(|bytes| (file2.filename, bytes))
-                } else {
-                    bail!("Download failed and no alternative files available: {}", e);
-                }
-            }
-        }
+        Ok((scored_file, result))
     }
 }

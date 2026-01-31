@@ -6,7 +6,7 @@ mod ws;
 pub use auth::{AuthUser, Claims, ErrorResponse, verify_token};
 pub use items::*;
 pub use lists::*;
-pub use ws::*;
+pub use ws::{progress_handler, WsEvent, create_broadcast_channel};
 
 use axum::{
     Router,
@@ -14,6 +14,7 @@ use axum::{
 };
 use tower_http::cors::CorsLayer;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 
 use crate::db::Database;
 use crate::services::{DownloadService, EmailService};
@@ -25,6 +26,7 @@ pub struct AppState {
     pub download_service: Arc<DownloadService>,
     pub jwt_secret: String,
     pub email_service: Option<EmailService>,
+    pub ws_broadcast: broadcast::Sender<WsEvent>,
 }
 
 /// Create the API router

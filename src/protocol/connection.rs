@@ -95,9 +95,22 @@ impl ServerConnection {
     }
 
     /// Set listening port for peer connections
-    pub async fn set_wait_port(&self, port: u32) -> Result<()> {
-        tracing::info!("[ServerConnection] Setting wait port to {}", port);
-        self.send(ServerMessage::SetWaitPort { port }).await
+    pub async fn set_wait_port(&self, port: u32, obfuscated_port: Option<u32>) -> Result<()> {
+        if let Some(obfs_port) = obfuscated_port {
+            tracing::info!("[ServerConnection] Setting wait port to {} (obfuscated: {})", port, obfs_port);
+            self.send(ServerMessage::SetWaitPort {
+                port,
+                obfuscation_type: Some(1), // 1 = Rotated obfuscation
+                obfuscated_port: Some(obfs_port),
+            }).await
+        } else {
+            tracing::info!("[ServerConnection] Setting wait port to {}", port);
+            self.send(ServerMessage::SetWaitPort {
+                port,
+                obfuscation_type: None,
+                obfuscated_port: None,
+            }).await
+        }
     }
 
     /// Get peer address

@@ -182,6 +182,10 @@ pub enum ServerMessage {
     },
     SetWaitPort {
         port: u32,
+        /// Obfuscation type: 0 = None, 1 = Rotated (optional)
+        obfuscation_type: Option<u32>,
+        /// Obfuscated port (optional, port + 1 typically)
+        obfuscated_port: Option<u32>,
     },
     GetPeerAddress {
         username: String,
@@ -346,9 +350,13 @@ impl MessageEncoder for ServerMessage {
                 encode_string(&mut buf, md5_hash);
                 buf.put_u32_le(*minor_version);
             }
-            ServerMessage::SetWaitPort { port } => {
+            ServerMessage::SetWaitPort { port, obfuscation_type, obfuscated_port } => {
                 buf.put_u32_le(ServerCode::SetWaitPort as u32);
                 buf.put_u32_le(*port);
+                if let (Some(obfs_type), Some(obfs_port)) = (obfuscation_type, obfuscated_port) {
+                    buf.put_u32_le(*obfs_type);
+                    buf.put_u32_le(*obfs_port);
+                }
             }
             ServerMessage::GetPeerAddress { username } => {
                 buf.put_u32_le(ServerCode::GetPeerAddress as u32);

@@ -140,6 +140,8 @@ pub struct UserResponse {
 #[derive(Debug, Deserialize)]
 pub struct SearchRequest {
     pub query: String,
+    /// Optional format filter: mp3, flac, m4a, wav
+    pub format: Option<String>,
 }
 
 /// Search list request
@@ -147,6 +149,8 @@ pub struct SearchRequest {
 pub struct SearchListRequest {
     pub name: Option<String>,
     pub queries: Vec<String>,
+    /// Optional format filter: mp3, flac, m4a, wav
+    pub format: Option<String>,
 }
 
 /// Item metadata for additional file information

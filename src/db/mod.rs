@@ -272,6 +272,45 @@ impl Database {
         Ok(item)
     }
 
+    /// Find completed item by original query (exact match)
+    pub async fn find_completed_item_by_query(&self, query: &str) -> Result<Option<Item>> {
+        let item = sqlx::query_as::<_, Item>(
+            "SELECT * FROM items WHERE original_query = ? AND download_status = 'completed' LIMIT 1"
+        )
+        .bind(query)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to find item by query")?;
+
+        Ok(item)
+    }
+
+    /// Find completed items with similar queries (for fuzzy duplicate detection)
+    /// Returns all completed items to allow fuzzy matching in application code
+    pub async fn get_completed_items(&self) -> Result<Vec<Item>> {
+        let items = sqlx::query_as::<_, Item>(
+            "SELECT * FROM items WHERE download_status = 'completed' ORDER BY created_at DESC"
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to get completed items")?;
+
+        Ok(items)
+    }
+
+    /// Find item by file path
+    pub async fn find_item_by_path(&self, file_path: &str) -> Result<Option<Item>> {
+        let item = sqlx::query_as::<_, Item>(
+            "SELECT * FROM items WHERE file_path = ?"
+        )
+        .bind(file_path)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to find item by path")?;
+
+        Ok(item)
+    }
+
     /// Update item status
     pub async fn update_item_status(
         &self,
@@ -296,6 +335,43 @@ impl Database {
         .execute(&self.pool)
         .await
         .context("Failed to update item status")?;
+
+        Ok(())
+    }
+
+    /// Update item file info (used when retry downloads from a different peer)
+    pub async fn update_item_file_info(
+        &self,
+        id: i64,
+        filename: &str,
+        file_path: &str,
+        source_username: &str,
+        file_size: i64,
+        bitrate: Option<i32>,
+    ) -> Result<()> {
+        let extension = std::path::Path::new(filename)
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+
+        sqlx::query(
+            r#"
+            UPDATE items
+            SET filename = ?, file_path = ?, source_username = ?, file_size = ?, bitrate = ?, extension = ?
+            WHERE id = ?
+            "#
+        )
+        .bind(filename)
+        .bind(file_path)
+        .bind(source_username)
+        .bind(file_size)
+        .bind(bitrate)
+        .bind(&extension)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .context("Failed to update item file info")?;
 
         Ok(())
     }

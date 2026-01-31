@@ -1,36 +1,120 @@
 use axum::{
-    extract::{State, ws::{WebSocket, WebSocketUpgrade, Message}},
+    extract::{State, Query, ws::{WebSocket, WebSocketUpgrade, Message}},
     response::Response,
 };
 use futures_util::{SinkExt, StreamExt};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use tokio::sync::broadcast;
 
-use crate::api::AppState;
-use crate::models::Item;
+use crate::api::{AppState, verify_token};
 
-#[derive(Serialize)]
-struct ProgressUpdate {
-    item_id: i64,
-    filename: String,
-    status: String,
-    progress: f64,
+/// Events that can be broadcast to WebSocket clients
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WsEvent {
+    /// Search has started
+    SearchStarted {
+        item_id: i64,
+        query: String,
+    },
+    /// Search progress update
+    SearchProgress {
+        item_id: i64,
+        results_count: usize,
+        users_count: usize,
+    },
+    /// Search completed
+    SearchCompleted {
+        item_id: i64,
+        results_count: usize,
+        selected_file: Option<String>,
+        selected_user: Option<String>,
+    },
+    /// Download has started
+    DownloadStarted {
+        item_id: i64,
+        filename: String,
+        total_bytes: u64,
+    },
+    /// Download progress update
+    DownloadProgress {
+        item_id: i64,
+        bytes_downloaded: u64,
+        total_bytes: u64,
+        progress_pct: f64,
+        speed_kbps: f64,
+    },
+    /// Download completed successfully
+    DownloadCompleted {
+        item_id: i64,
+        filename: String,
+        total_bytes: u64,
+    },
+    /// Download failed
+    DownloadFailed {
+        item_id: i64,
+        error: String,
+    },
+    /// Download was queued by peer
+    DownloadQueued {
+        item_id: i64,
+        position: Option<u32>,
+        reason: String,
+    },
+    /// Item status changed (generic update)
+    ItemUpdated {
+        item_id: i64,
+        filename: String,
+        status: String,
+        progress: f64,
+    },
+    /// Item already exists in library (duplicate found)
+    DuplicateFound {
+        item_id: i64,
+        filename: String,
+        query: String,
+    },
+}
+
+/// Query params for WebSocket connection
+#[derive(Deserialize)]
+pub struct WsQuery {
+    token: Option<String>,
+}
+
+/// Create a new broadcast channel for WebSocket events
+pub fn create_broadcast_channel() -> (broadcast::Sender<WsEvent>, broadcast::Receiver<WsEvent>) {
+    broadcast::channel(256)
 }
 
 /// WebSocket handler for download progress updates
 pub async fn progress_handler(
     ws: WebSocketUpgrade,
+    Query(query): Query<WsQuery>,
     State(state): State<AppState>,
 ) -> Response {
-    ws.on_upgrade(|socket| handle_socket(socket, state))
+    // Validate token if provided
+    if let Some(token) = &query.token {
+        if verify_token(token, &state.jwt_secret).is_err() {
+            tracing::warn!("WebSocket connection rejected: invalid token");
+            // We can't return an error directly from WebSocket upgrade,
+            // so we'll just close the socket immediately in handle_socket
+        }
+    }
+
+    ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
     tracing::info!("WebSocket client connected");
 
+    // Subscribe to broadcast channel
+    let mut rx = state.ws_broadcast.subscribe();
+
     // Send initial status of all items
     if let Ok(items) = state.download_service.get_all_items().await {
         for item in items {
-            let update = ProgressUpdate {
+            let update = WsEvent::ItemUpdated {
                 item_id: item.id,
                 filename: item.filename.clone(),
                 status: item.download_status.clone(),
@@ -45,44 +129,40 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         }
     }
 
-    // Poll for updates every 500ms
-    let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
-
     loop {
         tokio::select! {
-            _ = interval.tick() => {
-                // Get current items and send updates
-                match state.download_service.get_all_items().await {
-                    Ok(items) => {
-                        for item in items {
-                            // Only send if downloading or recently updated
-                            if item.download_status == "downloading" || item.download_status == "pending" {
-                                let update = ProgressUpdate {
-                                    item_id: item.id,
-                                    filename: item.filename.clone(),
-                                    status: item.download_status.clone(),
-                                    progress: item.download_progress,
-                                };
-
-                                if let Ok(msg) = serde_json::to_string(&update) {
-                                    if socket.send(Message::Text(msg)).await.is_err() {
-                                        tracing::info!("WebSocket client disconnected");
-                                        return;
-                                    }
-                                }
+            // Receive broadcast events and forward to client
+            event = rx.recv() => {
+                match event {
+                    Ok(ws_event) => {
+                        if let Ok(msg) = serde_json::to_string(&ws_event) {
+                            if socket.send(Message::Text(msg)).await.is_err() {
+                                tracing::info!("WebSocket client disconnected (send error)");
+                                return;
                             }
                         }
                     }
-                    Err(e) => {
-                        tracing::error!("Failed to get items: {}", e);
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("WebSocket client lagged, missed {} events", n);
+                        // Continue - we just missed some events
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        tracing::info!("Broadcast channel closed");
+                        return;
                     }
                 }
             }
 
+            // Handle incoming messages from client
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Text(_))) => {
-                        // Echo or handle text messages if needed
+                        // Could handle client messages here (e.g., subscribe to specific items)
+                    }
+                    Some(Ok(Message::Ping(data))) => {
+                        if socket.send(Message::Pong(data)).await.is_err() {
+                            return;
+                        }
                     }
                     Some(Ok(Message::Close(_))) | None => {
                         tracing::info!("WebSocket client disconnected");

@@ -62,6 +62,20 @@ pub async fn init_upnp() -> Result<bool> {
         tracing::info!("[UPnP] External IP: {}", external_ip);
     }
 
+    // Try to remove any existing mappings first (from crashed sessions)
+    tracing::info!("[UPnP] Removing any stale port mappings...");
+    match gateway.remove_port(PortMappingProtocol::TCP, PEER_LISTEN_PORT).await {
+        Ok(()) => tracing::info!("[UPnP] Removed existing mapping for port {}", PEER_LISTEN_PORT),
+        Err(_) => tracing::debug!("[UPnP] No existing mapping for port {} (or removal failed)", PEER_LISTEN_PORT),
+    }
+    match gateway.remove_port(PortMappingProtocol::TCP, PEER_OBFUSCATED_PORT).await {
+        Ok(()) => tracing::info!("[UPnP] Removed existing mapping for port {}", PEER_OBFUSCATED_PORT),
+        Err(_) => tracing::debug!("[UPnP] No existing mapping for port {} (or removal failed)", PEER_OBFUSCATED_PORT),
+    }
+
+    // Small delay to let router process the removal
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
     // Map main listen port (2234)
     let local_addr_main = SocketAddr::V4(SocketAddrV4::new(local_ip, PEER_LISTEN_PORT));
     match gateway.add_port(
@@ -76,7 +90,7 @@ pub async fn init_upnp() -> Result<bool> {
         }
         Err(e) => {
             tracing::warn!("[UPnP] Failed to map port {}: {}", PEER_LISTEN_PORT, e);
-            // Continue anyway, may already be mapped
+            // Continue anyway, may already be mapped to us
         }
     }
 

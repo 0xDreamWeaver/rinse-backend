@@ -68,14 +68,21 @@ pub async fn delete_item(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, Response> {
+    tracing::info!("=== DELETE ITEM REQUEST ===");
+    tracing::info!("Item ID: {}", id);
+
     state.download_service.delete_item(id)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to delete item: {}", e);
+            tracing::error!("=== DELETE ITEM FAILED ===");
+            tracing::error!("Item ID: {} - Error: {}", id, e);
             (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
                 error: "Failed to delete item".to_string()
             })).into_response()
         })?;
+
+    tracing::info!("=== DELETE ITEM SUCCESS ===");
+    tracing::info!("Deleted item ID: {}", id);
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -85,14 +92,22 @@ pub async fn batch_delete_items(
     State(state): State<AppState>,
     Json(payload): Json<BatchDeleteRequest>,
 ) -> Result<StatusCode, Response> {
-    state.download_service.delete_items(payload.ids)
+    tracing::info!("=== BATCH DELETE ITEMS REQUEST ===");
+    tracing::info!("Item IDs: {:?}", payload.ids);
+    tracing::info!("Count: {}", payload.ids.len());
+
+    state.download_service.delete_items(payload.ids.clone())
         .await
         .map_err(|e| {
-            tracing::error!("Failed to batch delete items: {}", e);
+            tracing::error!("=== BATCH DELETE ITEMS FAILED ===");
+            tracing::error!("Item IDs: {:?} - Error: {}", payload.ids, e);
             (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
                 error: "Failed to batch delete items".to_string()
             })).into_response()
         })?;
+
+    tracing::info!("=== BATCH DELETE ITEMS SUCCESS ===");
+    tracing::info!("Deleted {} items", payload.ids.len());
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -159,9 +174,10 @@ pub async fn search_item(
 
     tracing::info!("=== SEARCH REQUEST ===");
     tracing::info!("Query: '{}'", payload.query);
+    tracing::info!("Format filter: {:?}", payload.format);
     tracing::info!("User ID: {}", user_id);
 
-    let item = state.download_service.search_and_download_item(&payload.query, user_id)
+    let item = state.download_service.search_and_download_item(&payload.query, user_id, payload.format.as_deref())
         .await
         .map_err(|e| {
             tracing::error!("=== SEARCH FAILED ===");

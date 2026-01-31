@@ -72,14 +72,21 @@ pub async fn delete_list(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, Response> {
+    tracing::info!("=== DELETE LIST REQUEST ===");
+    tracing::info!("List ID: {}", id);
+
     state.download_service.delete_list(id)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to delete list: {}", e);
+            tracing::error!("=== DELETE LIST FAILED ===");
+            tracing::error!("List ID: {} - Error: {}", id, e);
             (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
                 error: "Failed to delete list".to_string()
             })).into_response()
         })?;
+
+    tracing::info!("=== DELETE LIST SUCCESS ===");
+    tracing::info!("Deleted list ID: {}", id);
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -89,14 +96,22 @@ pub async fn batch_delete_lists(
     State(state): State<AppState>,
     Json(payload): Json<BatchDeleteRequest>,
 ) -> Result<StatusCode, Response> {
-    state.download_service.delete_lists(payload.ids)
+    tracing::info!("=== BATCH DELETE LISTS REQUEST ===");
+    tracing::info!("List IDs: {:?}", payload.ids);
+    tracing::info!("Count: {}", payload.ids.len());
+
+    state.download_service.delete_lists(payload.ids.clone())
         .await
         .map_err(|e| {
-            tracing::error!("Failed to batch delete lists: {}", e);
+            tracing::error!("=== BATCH DELETE LISTS FAILED ===");
+            tracing::error!("List IDs: {:?} - Error: {}", payload.ids, e);
             (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
                 error: "Failed to batch delete lists".to_string()
             })).into_response()
         })?;
+
+    tracing::info!("=== BATCH DELETE LISTS SUCCESS ===");
+    tracing::info!("Deleted {} lists", payload.ids.len());
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -217,18 +232,34 @@ pub async fn search_list(
     // For now, assume user_id = 1 (will be extracted from JWT later)
     let user_id = 1;
 
+    tracing::info!("=== LIST SEARCH REQUEST ===");
+    tracing::info!("List name: {:?}", payload.name);
+    tracing::info!("Query count: {}", payload.queries.len());
+    tracing::info!("Queries: {:?}", payload.queries);
+    tracing::info!("Format filter: {:?}", payload.format);
+    tracing::info!("User ID: {}", user_id);
+
     let list = state.download_service.search_and_download_list(
-        payload.queries,
-        payload.name,
+        payload.queries.clone(),
+        payload.name.clone(),
         user_id,
+        payload.format.clone(),
     )
     .await
     .map_err(|e| {
-        tracing::error!("Failed to search and download list: {}", e);
+        tracing::error!("=== LIST SEARCH FAILED ===");
+        tracing::error!("List name: {:?} - Error: {}", payload.name, e);
         (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
             error: e.to_string()
         })).into_response()
     })?;
+
+    tracing::info!("=== LIST SEARCH COMPLETED ===");
+    tracing::info!("List ID: {}", list.id);
+    tracing::info!("List name: {}", list.name);
+    tracing::info!("Status: {}", list.status);
+    tracing::info!("Completed: {}/{}", list.completed_items, list.total_items);
+    tracing::info!("Failed: {}", list.failed_items);
 
     Ok(Json(list))
 }

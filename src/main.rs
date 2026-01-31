@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use db::Database;
 use services::{DownloadService, EmailService};
-use api::{AppState, create_router};
+use api::{AppState, create_router, create_broadcast_channel};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -91,11 +91,29 @@ async fn main() -> Result<()> {
         tracing::info!("Default admin user created (username: admin, password: admin123)");
     }
 
-    // Initialize download service
+    // Create WebSocket broadcast channel
+    let (ws_broadcast, _ws_rx) = create_broadcast_channel();
+
+    // Initialize download service with broadcast sender
     let download_service = Arc::new(DownloadService::new(
         db.clone(),
         PathBuf::from(&storage_path),
+        ws_broadcast.clone(),
     ));
+
+    // Initialize UPnP port forwarding for incoming peer connections
+    tracing::info!("Initializing UPnP port forwarding...");
+    match services::upnp::init_upnp().await {
+        Ok(true) => tracing::info!("UPnP port forwarding enabled (ports 2234, 2235)"),
+        Ok(false) => {
+            tracing::warn!("UPnP not available - peers may not be able to connect to us");
+            tracing::warn!("Consider manually forwarding port 2234 on your router");
+        }
+        Err(e) => {
+            tracing::warn!("UPnP initialization failed: {} - continuing without port forwarding", e);
+            tracing::warn!("Peers may not be able to connect for file transfers");
+        }
+    }
 
     // Connect to Soulseek automatically
     tracing::info!("Connecting to Soulseek network as '{}'...", slsk_username);
@@ -113,6 +131,7 @@ async fn main() -> Result<()> {
         download_service,
         jwt_secret,
         email_service,
+        ws_broadcast,
     };
 
     // Create router
