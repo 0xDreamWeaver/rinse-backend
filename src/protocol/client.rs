@@ -88,8 +88,22 @@ pub enum DownloadResult {
 /// Parameters: (downloaded_bytes, total_bytes)
 pub type ProgressCallback = Box<dyn Fn(u64, u64) + Send + Sync>;
 
+/// Generic transfer completion notification
+/// Used to notify when a spawned file transfer completes
+#[derive(Debug)]
+pub struct TransferComplete {
+    pub item_id: i64,
+    pub queue_id: i64,
+    pub list_id: Option<i64>,
+    pub transfer_token: u32,
+    pub result: Result<u64, String>,  // Ok(bytes) or Err(error message)
+}
+
+/// Sender for transfer completion notifications
+pub type TransferCompleteSender = mpsc::Sender<TransferComplete>;
+
 /// A pending (queued) download waiting for F connection
-#[derive(Debug, Clone)]
+/// Note: Not Clone due to callback fields
 pub struct PendingDownload {
     pub username: String,
     pub filename: String,
@@ -97,6 +111,50 @@ pub struct PendingDownload {
     pub transfer_token: u32,
     pub output_path: std::path::PathBuf,
     pub queued_at: std::time::Instant,
+    // Queue integration fields (optional - only set when using queue system)
+    pub item_id: Option<i64>,
+    pub queue_id: Option<i64>,
+    pub list_id: Option<i64>,
+    pub progress_callback: Option<super::peer::ArcProgressCallback>,
+    pub completion_tx: Option<TransferCompleteSender>,
+}
+
+impl std::fmt::Debug for PendingDownload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingDownload")
+            .field("username", &self.username)
+            .field("filename", &self.filename)
+            .field("filesize", &self.filesize)
+            .field("transfer_token", &self.transfer_token)
+            .field("output_path", &self.output_path)
+            .field("queued_at", &self.queued_at)
+            .field("item_id", &self.item_id)
+            .field("queue_id", &self.queue_id)
+            .field("list_id", &self.list_id)
+            .field("has_progress_callback", &self.progress_callback.is_some())
+            .field("has_completion_tx", &self.completion_tx.is_some())
+            .finish()
+    }
+}
+
+/// Result of initiating a download (for queue-based downloads)
+#[derive(Debug)]
+pub enum DownloadInitResult {
+    /// Transfer has been spawned as a background task
+    TransferSpawned {
+        item_id: i64,
+        transfer_token: u32,
+    },
+    /// Download is queued at peer - F connection will arrive later
+    Queued {
+        transfer_token: u32,
+        position: Option<u32>,
+        reason: String,
+    },
+    /// Download failed during negotiation
+    Failed {
+        reason: String,
+    },
 }
 
 /// Main Soulseek client - simplified architecture matching E2E test
@@ -273,7 +331,11 @@ impl SoulseekClient {
                                     // Check if this matches a pending (queued) download
                                     let pending = pending_downloads.lock().await.remove(&token);
                                     if let Some(pending_dl) = pending {
-                                        tracing::info!("[Listener] Resuming queued download for '{}'", pending_dl.filename);
+                                        tracing::info!(
+                                            "[Listener] Resuming pending download for '{}' (item_id={:?})",
+                                            pending_dl.filename,
+                                            pending_dl.item_id
+                                        );
 
                                         // Update status to in progress
                                         {
@@ -283,26 +345,76 @@ impl SoulseekClient {
                                             }
                                         }
 
-                                        // Process the download with progress tracking
-                                        let filename_for_progress = pending_dl.filename.clone();
+                                        // Spawn the file transfer as a background task
                                         let downloads_clone = Arc::clone(&downloads);
-                                        match Self::receive_file_static(conn, pending_dl.filesize, &pending_dl.output_path, &filename_for_progress, downloads_clone).await {
-                                            Ok(bytes) => {
-                                                tracing::info!("[Listener] Completed queued download: {} bytes", bytes);
-                                                let mut dl = downloads.lock().await;
-                                                if let Some(p) = dl.get_mut(&pending_dl.filename) {
-                                                    p.downloaded_bytes = bytes;
-                                                    p.status = DownloadStatus::Completed;
+                                        let filename = pending_dl.filename.clone();
+                                        let filesize = pending_dl.filesize;
+                                        let output_path = pending_dl.output_path.clone();
+                                        let progress_callback = pending_dl.progress_callback;
+                                        let completion_tx = pending_dl.completion_tx;
+                                        let item_id = pending_dl.item_id;
+                                        let queue_id = pending_dl.queue_id;
+                                        let list_id = pending_dl.list_id;
+                                        let transfer_token = pending_dl.transfer_token;
+
+                                        tokio::spawn(async move {
+                                            tracing::info!(
+                                                "[Transfer] Starting file receive: {} ({} bytes)",
+                                                filename, filesize
+                                            );
+
+                                            // Use receive_file_data from peer module
+                                            let result = super::peer::receive_file_data(
+                                                conn,
+                                                filesize,
+                                                output_path.clone(),
+                                                progress_callback,
+                                            ).await;
+
+                                            // Update internal download status
+                                            match &result {
+                                                Ok(bytes) => {
+                                                    tracing::info!(
+                                                        "[Transfer] Completed: {} ({} bytes)",
+                                                        filename, bytes
+                                                    );
+                                                    let mut dl = downloads_clone.lock().await;
+                                                    if let Some(p) = dl.get_mut(&filename) {
+                                                        p.downloaded_bytes = *bytes;
+                                                        p.status = DownloadStatus::Completed;
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    tracing::error!(
+                                                        "[Transfer] Failed: {} - {}",
+                                                        filename, e
+                                                    );
+                                                    let mut dl = downloads_clone.lock().await;
+                                                    if let Some(p) = dl.get_mut(&filename) {
+                                                        p.status = DownloadStatus::Failed(e.to_string());
+                                                    }
                                                 }
                                             }
-                                            Err(e) => {
-                                                tracing::error!("[Listener] Failed queued download: {}", e);
-                                                let mut dl = downloads.lock().await;
-                                                if let Some(p) = dl.get_mut(&pending_dl.filename) {
-                                                    p.status = DownloadStatus::Failed(e.to_string());
+
+                                            // Send completion notification if channel provided
+                                            if let (Some(tx), Some(item_id), Some(queue_id)) =
+                                                (completion_tx, item_id, queue_id)
+                                            {
+                                                let completion = TransferComplete {
+                                                    item_id,
+                                                    queue_id,
+                                                    list_id,
+                                                    transfer_token,
+                                                    result: result.map_err(|e| e.to_string()),
+                                                };
+                                                if let Err(e) = tx.send(completion).await {
+                                                    tracing::warn!(
+                                                        "[Transfer] Failed to send completion: {}",
+                                                        e
+                                                    );
                                                 }
                                             }
-                                        }
+                                        });
                                     } else {
                                         // Not a pending download, send to channel for active downloads
                                         let _ = file_conn_tx.send(conn).await;
@@ -399,11 +511,21 @@ impl SoulseekClient {
 
         // Collect results from server ConnectToPeer messages
         // Early exit: once we have enough results and no new ones for 2 seconds, return
+        let no_results_timeout = Duration::from_secs(5);
+
         while start.elapsed() < timeout {
             // Early exit conditions (after minimum wait time):
             // 1. We have at least 5 results with files AND no new results for 2 seconds
             // 2. We have at least 10 results with files (good enough, return immediately)
+            // 3. After 5 seconds with ZERO results - abort early (no point waiting longer)
             let results_with_files = results.iter().filter(|r| !r.files.is_empty()).count();
+
+            // Check for no results after 5 seconds - abort early
+            if start.elapsed() > no_results_timeout && results_with_files == 0 {
+                tracing::info!("[Search] Early abort: no results after {:?}", start.elapsed());
+                bail!("No results found for search '{}'", query);
+            }
+
             if start.elapsed() > min_wait {
                 if results_with_files >= 10 {
                     tracing::info!("[Search] Early exit: {} results with files", results_with_files);
@@ -745,6 +867,12 @@ impl SoulseekClient {
                         transfer_token,
                         output_path: output_path.to_path_buf(),
                         queued_at: std::time::Instant::now(),
+                        // Legacy path - no queue integration
+                        item_id: None,
+                        queue_id: None,
+                        list_id: None,
+                        progress_callback: None,
+                        completion_tx: None,
                     });
                 }
 
@@ -764,6 +892,275 @@ impl SoulseekClient {
         let mut downloads = self.downloads.lock().await;
         if let Some(p) = downloads.get_mut(filename) {
             p.status = status;
+        }
+    }
+
+    /// Initiate a download for the queue system
+    ///
+    /// This method performs the complete download negotiation flow:
+    /// 1. Establishes/reuses P connection with peer
+    /// 2. Sends QueueUpload request
+    /// 3. Waits for TransferRequest/TransferReply exchange
+    /// 4. Waits for F connection (direct or server-brokered)
+    /// 5. Spawns file receive as background task
+    ///
+    /// The method blocks during negotiation and F connection establishment,
+    /// but the actual file transfer runs concurrently in the background.
+    ///
+    /// # Arguments
+    /// - username, filename, filesize, peer_ip, peer_port: File info from search
+    /// - output_path: Where to save the downloaded file
+    /// - item_id, queue_id, list_id: Queue integration IDs for tracking
+    /// - progress_callback: Optional callback for progress updates
+    /// - completion_tx: Channel to send completion notifications
+    ///
+    /// # Returns
+    /// - TransferSpawned: File transfer started in background
+    /// - Queued: Peer queued us, transfer will happen later (registered as pending)
+    /// - Failed: Negotiation or connection failed
+    pub async fn initiate_download(
+        &mut self,
+        username: &str,
+        filename: &str,
+        filesize: u64,
+        peer_ip: &str,
+        peer_port: u32,
+        output_path: &std::path::Path,
+        item_id: i64,
+        queue_id: i64,
+        list_id: Option<i64>,
+        progress_callback: Option<super::peer::ArcProgressCallback>,
+        completion_tx: TransferCompleteSender,
+    ) -> DownloadInitResult {
+        tracing::info!(
+            "[Download] Initiating download from '{}' (item_id={}, queue_id={})",
+            username, item_id, queue_id
+        );
+        tracing::info!("[Download] File: {}", filename);
+
+        // Update internal status to pending
+        {
+            let mut downloads = self.downloads.lock().await;
+            downloads.insert(filename.to_string(), DownloadProgress {
+                filename: filename.to_string(),
+                total_bytes: filesize,
+                downloaded_bytes: 0,
+                status: DownloadStatus::Pending,
+            });
+        }
+
+        // Step 1: Get or establish P connection with peer
+        let stored_stream = self.peer_streams.lock().await.remove(username);
+
+        let mut peer_stream = match stored_stream {
+            Some(stream) => {
+                tracing::info!("[Download] Using stored P connection from search");
+                stream
+            }
+            None => {
+                tracing::info!("[Download] No stored P connection, attempting direct connection");
+
+                let (final_ip, final_port) = if !peer_ip.is_empty() && peer_port > 0 {
+                    (peer_ip.to_string(), peer_port)
+                } else {
+                    match self.get_peer_address(username).await {
+                        Ok((ip, port)) if port > 0 => (ip, port),
+                        _ => {
+                            let reason = "No stored P connection and cannot get peer address".to_string();
+                            self.update_download_status(filename, DownloadStatus::Failed(reason.clone())).await;
+                            return DownloadInitResult::Failed { reason };
+                        }
+                    }
+                };
+
+                match self.connect_to_peer_for_download(username, &final_ip, final_port).await {
+                    Ok(stream) => {
+                        tracing::info!("[Download] Direct P connection established");
+                        stream
+                    }
+                    Err(e) => {
+                        let reason = format!("Failed to connect to peer: {}", e);
+                        self.update_download_status(filename, DownloadStatus::Failed(reason.clone())).await;
+                        return DownloadInitResult::Failed { reason };
+                    }
+                }
+            }
+        };
+
+        // Step 2: Send QueueUpload request
+        tracing::info!("[Download] Sending QueueUpload for '{}'...", filename);
+        if let Err(e) = queue_upload(&mut peer_stream, filename).await {
+            let reason = format!("Failed to send QueueUpload: {}", e);
+            self.update_download_status(filename, DownloadStatus::Failed(reason.clone())).await;
+            return DownloadInitResult::Failed { reason };
+        }
+
+        // Step 3: Wait for TransferRequest and send TransferReply
+        tracing::info!("[Download] Waiting for peer's TransferRequest...");
+        let negotiation = match wait_for_transfer_request(&mut peer_stream, filename, 60).await {
+            Ok(result) => result,
+            Err(e) => {
+                let reason = format!("Negotiation failed: {}", e);
+                self.update_download_status(filename, DownloadStatus::Failed(reason.clone())).await;
+                return DownloadInitResult::Failed { reason };
+            }
+        };
+
+        // Release P connection - negotiation is complete
+        drop(peer_stream);
+
+        // Handle negotiation result
+        match negotiation {
+            NegotiationResult::Allowed { filesize: actual_size, transfer_token } => {
+                tracing::info!(
+                    "[Download] Transfer ALLOWED: size={} bytes, token={}",
+                    actual_size, transfer_token
+                );
+
+                // Update status to in progress
+                self.update_download_status(filename, DownloadStatus::InProgress).await;
+                {
+                    let mut downloads = self.downloads.lock().await;
+                    if let Some(p) = downloads.get_mut(filename) {
+                        p.total_bytes = actual_size;
+                    }
+                }
+
+                // Step 4: Wait for F connection (direct or server-brokered)
+                // This is critical - we must actively wait for the connection,
+                // not just register and hope the listener catches it
+                tracing::info!("[Download] Waiting for F connection (token={})...", transfer_token);
+
+                let file_conn = {
+                    let mut file_conn_rx = self.file_conn_rx.lock().await;
+                    super::peer::wait_for_file_connection(
+                        &mut self.server_stream,
+                        username,
+                        &self.username,
+                        transfer_token,
+                        &mut file_conn_rx,
+                        30, // 30 second timeout for F connection
+                    ).await
+                };
+
+                match file_conn {
+                    Ok(conn) => {
+                        tracing::info!("[Download] F connection established, spawning file transfer");
+
+                        // Step 5: Spawn file receive as background task
+                        let output_path = output_path.to_path_buf();
+                        let downloads_clone = Arc::clone(&self.downloads);
+                        let filename_clone = filename.to_string();
+
+                        tokio::spawn(async move {
+                            let result = super::peer::receive_file_data(
+                                conn,
+                                actual_size,
+                                output_path,
+                                progress_callback,
+                            ).await;
+
+                            // Update download status
+                            match &result {
+                                Ok(bytes) => {
+                                    tracing::info!("[Transfer] Complete: {} bytes", bytes);
+                                    let mut dl = downloads_clone.lock().await;
+                                    if let Some(p) = dl.get_mut(&filename_clone) {
+                                        p.status = DownloadStatus::Completed;
+                                        p.downloaded_bytes = *bytes;
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!("[Transfer] Failed: {}", e);
+                                    let mut dl = downloads_clone.lock().await;
+                                    if let Some(p) = dl.get_mut(&filename_clone) {
+                                        p.status = DownloadStatus::Failed(e.to_string());
+                                    }
+                                }
+                            }
+
+                            // Send completion notification
+                            let transfer_result = result.map(|b| b).map_err(|e| e.to_string());
+                            let _ = completion_tx.send(TransferComplete {
+                                item_id,
+                                queue_id,
+                                list_id,
+                                transfer_token,
+                                result: transfer_result,
+                            }).await;
+                        });
+
+                        DownloadInitResult::TransferSpawned {
+                            item_id,
+                            transfer_token,
+                        }
+                    }
+                    Err(e) => {
+                        let reason = format!("Failed to establish F connection: {}", e);
+                        tracing::error!("[Download] {}", reason);
+                        self.update_download_status(filename, DownloadStatus::Failed(reason.clone())).await;
+
+                        // Notify of failure
+                        let _ = completion_tx.send(TransferComplete {
+                            item_id,
+                            queue_id,
+                            list_id,
+                            transfer_token,
+                            result: Err(reason.clone()),
+                        }).await;
+
+                        DownloadInitResult::Failed { reason }
+                    }
+                }
+            }
+
+            NegotiationResult::Queued { transfer_token, position, reason } => {
+                // Peer has queued our request - they'll initiate transfer later
+                // We register as pending so the listener can handle when F connection arrives
+                tracing::info!("[Download] QUEUED by peer: {} (position: {:?})", reason, position);
+
+                self.update_download_status(filename, DownloadStatus::Queued).await;
+
+                // Register as pending download - listener will handle F connection later
+                {
+                    let mut pending = self.pending_downloads.lock().await;
+                    pending.insert(transfer_token, PendingDownload {
+                        username: username.to_string(),
+                        filename: filename.to_string(),
+                        filesize,
+                        transfer_token,
+                        output_path: output_path.to_path_buf(),
+                        queued_at: std::time::Instant::now(),
+                        item_id: Some(item_id),
+                        queue_id: Some(queue_id),
+                        list_id,
+                        progress_callback,
+                        completion_tx: Some(completion_tx),
+                    });
+                }
+
+                DownloadInitResult::Queued {
+                    transfer_token,
+                    position,
+                    reason,
+                }
+            }
+
+            NegotiationResult::Denied { reason } => {
+                tracing::info!("[Download] DENIED by peer: {}", reason);
+                self.update_download_status(filename, DownloadStatus::Failed(reason.clone())).await;
+
+                // Notify of failure
+                let _ = completion_tx.send(TransferComplete {
+                    item_id,
+                    queue_id,
+                    list_id,
+                    transfer_token: 0,
+                    result: Err(reason.clone()),
+                }).await;
+
+                DownloadInitResult::Failed { reason }
+            }
         }
     }
 

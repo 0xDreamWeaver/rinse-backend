@@ -1,0 +1,342 @@
+react-dom_client.js?v=7538b72d:20103 Download the React DevTools for a better development experience: https://react.dev/link/react-devtools
+useWebSocket.ts:52 WebSocket connection to 'ws://localhost:3000/api/ws/progress?token=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOjUsInVzZXJuYW1lIjoiZHJlYW0iLCJleHAiOjE3NzA1NDU2MTF9.mX2OSd9vKtO2Mp0QeH1MBwXcfveleaNkk_nzp02zuiA' failed: WebSocket is closed before the connection is established.
+(anonymous) @ useWebSocket.ts:52
+react_stack_bottom_frame @ react-dom_client.js?v=7538b72d:18573
+runWithFiberInDEV @ react-dom_client.js?v=7538b72d:997
+commitHookEffectListUnmount @ react-dom_client.js?v=7538b72d:9449
+commitHookPassiveUnmountEffects @ react-dom_client.js?v=7538b72d:9468
+disconnectPassiveEffect @ react-dom_client.js?v=7538b72d:11560
+doubleInvokeEffectsOnFiber @ react-dom_client.js?v=7538b72d:13339
+runWithFiberInDEV @ react-dom_client.js?v=7538b72d:997
+recursivelyTraverseAndDoubleInvokeEffectsInDEV @ react-dom_client.js?v=7538b72d:13312
+recursivelyTraverseAndDoubleInvokeEffectsInDEV @ react-dom_client.js?v=7538b72d:13317
+recursivelyTraverseAndDoubleInvokeEffectsInDEV @ react-dom_client.js?v=7538b72d:13317
+recursivelyTraverseAndDoubleInvokeEffectsInDEV @ react-dom_client.js?v=7538b72d:13317
+recursivelyTraverseAndDoubleInvokeEffectsInDEV @ react-dom_client.js?v=7538b72d:13317
+recursivelyTraverseAndDoubleInvokeEffectsInDEV @ react-dom_client.js?v=7538b72d:13317
+recursivelyTraverseAndDoubleInvokeEffectsInDEV @ react-dom_client.js?v=7538b72d:13317
+recursivelyTraverseAndDoubleInvokeEffectsInDEV @ react-dom_client.js?v=7538b72d:13317
+recursivelyTraverseAndDoubleInvokeEffectsInDEV @ react-dom_client.js?v=7538b72d:13317
+recursivelyTraverseAndDoubleInvokeEffectsInDEV @ react-dom_client.js?v=7538b72d:13317
+recursivelyTraverseAndDoubleInvokeEffectsInDEV @ react-dom_client.js?v=7538b72d:13317
+recursivelyTraverseAndDoubleInvokeEffectsInDEV @ react-dom_client.js?v=7538b72d:13317
+recursivelyTraverseAndDoubleInvokeEffectsInDEV @ react-dom_client.js?v=7538b72d:13317
+recursivelyTraverseAndDoubleInvokeEffectsInDEV @ react-dom_client.js?v=7538b72d:13317
+commitDoubleInvokeEffectsInDEV @ react-dom_client.js?v=7538b72d:13347
+flushPassiveEffects @ react-dom_client.js?v=7538b72d:13157
+flushPendingEffects @ react-dom_client.js?v=7538b72d:13088
+flushSpawnedWork @ react-dom_client.js?v=7538b72d:13062
+commitRoot @ react-dom_client.js?v=7538b72d:12804
+commitRootWhenReady @ react-dom_client.js?v=7538b72d:12016
+performWorkOnRoot @ react-dom_client.js?v=7538b72d:11950
+performSyncWorkOnRoot @ react-dom_client.js?v=7538b72d:13517
+flushSyncWorkAcrossRoots_impl @ react-dom_client.js?v=7538b72d:13414
+processRootScheduleInMicrotask @ react-dom_client.js?v=7538b72d:13437
+(anonymous) @ react-dom_client.js?v=7538b72d:13531
+<Layout>
+exports.jsxDEV @ react_jsx-dev-runtime.js?v=7538b72d:247
+App @ App.tsx:83
+react_stack_bottom_frame @ react-dom_client.js?v=7538b72d:18509
+renderWithHooksAgain @ react-dom_client.js?v=7538b72d:5729
+renderWithHooks @ react-dom_client.js?v=7538b72d:5665
+updateFunctionComponent @ react-dom_client.js?v=7538b72d:7475
+beginWork @ react-dom_client.js?v=7538b72d:8525
+runWithFiberInDEV @ react-dom_client.js?v=7538b72d:997
+performUnitOfWork @ react-dom_client.js?v=7538b72d:12561
+workLoopSync @ react-dom_client.js?v=7538b72d:12424
+renderRootSync @ react-dom_client.js?v=7538b72d:12408
+performWorkOnRoot @ react-dom_client.js?v=7538b72d:11766
+performWorkOnRootViaSchedulerTask @ react-dom_client.js?v=7538b72d:13505
+performWorkUntilDeadline @ react-dom_client.js?v=7538b72d:36
+<App>
+exports.jsxDEV @ react_jsx-dev-runtime.js?v=7538b72d:247
+(anonymous) @ main.tsx:8
+useWebSocket.ts:30 WebSocket error: Event {isTrusted: true, type: 'error', target: WebSocket, currentTarget: WebSocket, eventPhase: 2, …}isTrusted: truebubbles: falsecancelBubble: falsecancelable: falsecomposed: falsecurrentTarget: nulldefaultPrevented: falseeventPhase: 0returnValue: truesrcElement: WebSocket {url: 'ws://localhost:3000/api/ws/progress?token=eyJ0eXAi…2MTF9.mX2OSd9vKtO2Mp0QeH1MBwXcfveleaNkk_nzp02zuiA', readyState: 3, bufferedAmount: 0, onopen: ƒ, onerror: ƒ, …}target: WebSocket {url: 'ws://localhost:3000/api/ws/progress?token=eyJ0eXAi…2MTF9.mX2OSd9vKtO2Mp0QeH1MBwXcfveleaNkk_nzp02zuiA', readyState: 3, bufferedAmount: 0, onopen: ƒ, onerror: ƒ, …}timeStamp: 427.60000002384186type: "error"[[Prototype]]: Event
+socket.onerror @ useWebSocket.ts:30
+useWebSocket.ts:34 WebSocket closed, reconnecting in 5s...
+useWebSocket.ts:16 WebSocket connected
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 103, filename: '1. Pola & Bryson - Find Your Way.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 103, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 102, filename: '10 Flite - Colorless.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 102, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 101, filename: '07. Flite, Justin Hawkes - Blue Spark VIP.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 101, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 100, filename: 'Nu-Logic - Somewhere Between the Light - 01 - Somewhere Between the Light.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 100, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 99, filename: '01 - Cupid (Twin ver.).flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 99, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 98, filename: '01. LiSA - crossing field.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 98, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 97, filename: '04. Tokyo.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 97, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 96, filename: '03 PONPONPON.mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 96, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 95, filename: '01 arthur x medic - Renai Circulation (arthur x medic remix).flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 95, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 94, filename: '01 4.mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 94, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 92, filename: '266 Aphex Twin - Avril 14th, Reversed Music Not Audio..mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 92, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 91, filename: '09 Girl-Boy Song.mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 91, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 90, filename: '12. Aphex Twin - Windowlicker.mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 90, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 88, filename: '6 - Bambee - Bumble Bee.mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 88, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 86, filename: '01. Caramelldansen.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 86, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 85, filename: '03.PONPONPON.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 85, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 82, filename: '02 Pola & Bryson - Stolen Glances (Phaction Remix).flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 82, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 80, filename: '23. Maduk & Veela - Ghost Assassin (Vip).flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 80, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 79, filename: '18. Jakwob - Blinding (Hybrid Minds Remix).flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 79, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 77, filename: '03. Skrillex - Ruffneck (FULL Flex).flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 77, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 76, filename: 'Skrillex- Scary Monsters And Nice Sprites( Razvanel MEGA remix).mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 76, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 75, filename: '16 - Dan Dakota - Stood In The Dark (Andromedik Remix).flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 75, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 74, filename: '0725 - BoxPlot - Clouds Rest.mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 74, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 73, filename: '1394 - Dawn Wall - Holding On.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 73, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 72, filename: '02. LTJ Bukem - Flip The Narrative.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 72, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 71, filename: '2. Skrillex - Bangarang (feat. Sirah).flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 71, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 69, filename: '01 - Skrillex - Scary Monsters And Nice Sprites.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 69, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 68, filename: '26. Get Free (Andy C Remix) - Major Lazer ft. Amber Coffman.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 68, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 67, filename: '60. Camo & Krooked - Honesty.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 67, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 63, filename: '10. Pola & Bryson - Diamonds Fall.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 63, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 62, filename: '25 Bustre - Don’t Forget.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 62, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 61, filename: "12 - Raise Spirit - Don't Let Go.flac", status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 61, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 58, filename: '0479. NCT - Frozen In Time.mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 58, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 57, filename: '01. Maduk - Ghost Assassin (feat. Veela).flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 57, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 53, filename: '06 Feint - Laurence.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 53, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 47, filename: '1-01 Windowlicker (Acid Edit).mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 47, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 46, filename: '08 - The Prodigy - Firestarter.mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 46, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 45, filename: 'FATBOY SLIM - RIGHT HERE RIGHT NOW (SOUBERIAN EDIT).mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 45, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 44, filename: "03 The Chemical Brothers - Block Rockin' Beats (The Micronauts Mix).mp3", status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 44, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 42, filename: 'DAFT PUNK - AROUND THE WORLD.mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 42, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 37, filename: '05.Logistics - Take Me to Another World (feat. Stella Attar).flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 37, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 36, filename: '06 - Netsky - Go 2.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 36, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 35, filename: 'Hybrid Minds - Not Alone.mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 35, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 34, filename: '04 - Netsky - Eyes Closed.mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 34, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 33, filename: '05.Flite And Boxplot - Sunroad (feat. Audioscribe).flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 33, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 32, filename: '0969. Smote - Summertime.mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 32, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 31, filename: 'BLADEE - Mean Girls.mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 31, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 30, filename: '13. 2hollis - sidekick (Explicit).flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 30, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 29, filename: '2Hollis - Jeans.mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 29, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 24, filename: '01 Apple.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 24, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:16 WebSocket connected
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 103, filename: '1. Pola & Bryson - Find Your Way.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 103, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 102, filename: '10 Flite - Colorless.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 102, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 101, filename: '07. Flite, Justin Hawkes - Blue Spark VIP.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 101, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 100, filename: 'Nu-Logic - Somewhere Between the Light - 01 - Somewhere Between the Light.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 100, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 99, filename: '01 - Cupid (Twin ver.).flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 99, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 98, filename: '01. LiSA - crossing field.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 98, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 97, filename: '04. Tokyo.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 97, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 96, filename: '03 PONPONPON.mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 96, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 95, filename: '01 arthur x medic - Renai Circulation (arthur x medic remix).flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 95, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 94, filename: '01 4.mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 94, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 92, filename: '266 Aphex Twin - Avril 14th, Reversed Music Not Audio..mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 92, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 91, filename: '09 Girl-Boy Song.mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 91, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 90, filename: '12. Aphex Twin - Windowlicker.mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 90, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 88, filename: '6 - Bambee - Bumble Bee.mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 88, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 86, filename: '01. Caramelldansen.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 86, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 85, filename: '03.PONPONPON.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 85, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 82, filename: '02 Pola & Bryson - Stolen Glances (Phaction Remix).flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 82, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 80, filename: '23. Maduk & Veela - Ghost Assassin (Vip).flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 80, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 79, filename: '18. Jakwob - Blinding (Hybrid Minds Remix).flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 79, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 77, filename: '03. Skrillex - Ruffneck (FULL Flex).flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 77, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 76, filename: 'Skrillex- Scary Monsters And Nice Sprites( Razvanel MEGA remix).mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 76, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 75, filename: '16 - Dan Dakota - Stood In The Dark (Andromedik Remix).flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 75, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 74, filename: '0725 - BoxPlot - Clouds Rest.mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 74, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 73, filename: '1394 - Dawn Wall - Holding On.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 73, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 72, filename: '02. LTJ Bukem - Flip The Narrative.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 72, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 71, filename: '2. Skrillex - Bangarang (feat. Sirah).flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 71, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 69, filename: '01 - Skrillex - Scary Monsters And Nice Sprites.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 69, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 68, filename: '26. Get Free (Andy C Remix) - Major Lazer ft. Amber Coffman.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 68, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 67, filename: '60. Camo & Krooked - Honesty.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 67, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 63, filename: '10. Pola & Bryson - Diamonds Fall.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 63, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 62, filename: '25 Bustre - Don’t Forget.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 62, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 61, filename: "12 - Raise Spirit - Don't Let Go.flac", status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 61, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 58, filename: '0479. NCT - Frozen In Time.mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 58, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 57, filename: '01. Maduk - Ghost Assassin (feat. Veela).flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 57, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 53, filename: '06 Feint - Laurence.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 53, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 47, filename: '1-01 Windowlicker (Acid Edit).mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 47, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 46, filename: '08 - The Prodigy - Firestarter.mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 46, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 45, filename: 'FATBOY SLIM - RIGHT HERE RIGHT NOW (SOUBERIAN EDIT).mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 45, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 44, filename: "03 The Chemical Brothers - Block Rockin' Beats (The Micronauts Mix).mp3", status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 44, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 42, filename: 'DAFT PUNK - AROUND THE WORLD.mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 42, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 37, filename: '05.Logistics - Take Me to Another World (feat. Stella Attar).flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 37, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 36, filename: '06 - Netsky - Go 2.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 36, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 35, filename: 'Hybrid Minds - Not Alone.mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 35, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 34, filename: '04 - Netsky - Eyes Closed.mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 34, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 33, filename: '05.Flite And Boxplot - Sunroad (feat. Audioscribe).flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 33, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 32, filename: '0969. Smote - Summertime.mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 32, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 31, filename: 'BLADEE - Mean Girls.mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 31, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 30, filename: '13. 2hollis - sidekick (Explicit).flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 30, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 29, filename: '2Hollis - Jeans.mp3', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 29, query: undefined, activeDownloadsKeys: Array(0)}
+useWebSocket.ts:22 WebSocket event: item_updated {type: 'item_updated', item_id: 24, filename: '01 Apple.flac', status: 'completed', progress: 1}
+index.ts:135 [Popup] WS Event received: {type: 'item_updated', client_id: undefined, item_id: 24, query: undefined, activeDownloadsKeys: Array(0)}
+index.ts:112 [Popup] addPendingSearch: {query: 'Pola & Bryson Find Your Way', clientId: 'search-1769943874937-6jp5ssh6h'}
+useWebSocket.ts:22 WebSocket event: search_queued {type: 'search_queued', queue_id: 81, query: 'Pola & Bryson Find Your Way', position: 0, client_id: 'search-1769943874937-6jp5ssh6h'}
+index.ts:135 [Popup] WS Event received: {type: 'search_queued', client_id: 'search-1769943874937-6jp5ssh6h', item_id: undefined, query: 'Pola & Bryson Find Your Way', activeDownloadsKeys: Array(1)}
+useWebSocket.ts:22 WebSocket event: search_queued {type: 'search_queued', queue_id: 81, query: 'Pola & Bryson Find Your Way', position: 0, client_id: 'search-1769943874937-6jp5ssh6h'}
+index.ts:135 [Popup] WS Event received: {type: 'search_queued', client_id: 'search-1769943874937-6jp5ssh6h', item_id: undefined, query: 'Pola & Bryson Find Your Way', activeDownloadsKeys: Array(1)}
+useWebSocket.ts:22 WebSocket event: search_processing {type: 'search_processing', queue_id: 81, query: 'Pola & Bryson Find Your Way', client_id: 'search-1769943874937-6jp5ssh6h'}
+index.ts:135 [Popup] WS Event received: {type: 'search_processing', client_id: 'search-1769943874937-6jp5ssh6h', item_id: undefined, query: 'Pola & Bryson Find Your Way', activeDownloadsKeys: Array(1)}
+useWebSocket.ts:22 WebSocket event: search_processing {type: 'search_processing', queue_id: 81, query: 'Pola & Bryson Find Your Way', client_id: 'search-1769943874937-6jp5ssh6h'}
+index.ts:135 [Popup] WS Event received: {type: 'search_processing', client_id: 'search-1769943874937-6jp5ssh6h', item_id: undefined, query: 'Pola & Bryson Find Your Way', activeDownloadsKeys: Array(1)}
+useWebSocket.ts:22 WebSocket event: search_started {type: 'search_started', item_id: 0, query: 'Pola & Bryson Find Your Way', client_id: 'search-1769943874937-6jp5ssh6h'}
+index.ts:135 [Popup] WS Event received: {type: 'search_started', client_id: 'search-1769943874937-6jp5ssh6h', item_id: 0, query: 'Pola & Bryson Find Your Way', activeDownloadsKeys: Array(1)}
+index.ts:148 [Popup] findByClientId found: {clientId: 'search-1769943874937-6jp5ssh6h', download: {…}}
+index.ts:183 [Popup] findEntry matched by client_id: {clientId: 'search-1769943874937-6jp5ssh6h'}
+index.ts:210 [Popup] search_started: updating existing entry {key: 'search-1769943874937-6jp5ssh6h', client_id: 'search-1769943874937-6jp5ssh6h'}
+useWebSocket.ts:22 WebSocket event: duplicate_found {type: 'duplicate_found', item_id: 103, filename: '1. Pola & Bryson - Find Your Way.flac', query: 'Pola & Bryson Find Your Way', client_id: 'search-1769943874937-6jp5ssh6h'}
+index.ts:135 [Popup] WS Event received: {type: 'duplicate_found', client_id: 'search-1769943874937-6jp5ssh6h', item_id: 103, query: 'Pola & Bryson Find Your Way', activeDownloadsKeys: Array(1)}
+index.ts:148 [Popup] findByClientId found: {clientId: 'search-1769943874937-6jp5ssh6h', download: {…}}
+index.ts:183 [Popup] findEntry matched by client_id: {clientId: 'search-1769943874937-6jp5ssh6h'}
+index.ts:421 [Popup] duplicate_found: updating existing entry {key: 'search-1769943874937-6jp5ssh6h', client_id: 'search-1769943874937-6jp5ssh6h', previousStage: 'searching'}
+useWebSocket.ts:22 WebSocket event: search_started {type: 'search_started', item_id: 0, query: 'Pola & Bryson Find Your Way', client_id: 'search-1769943874937-6jp5ssh6h'}
+index.ts:135 [Popup] WS Event received: {type: 'search_started', client_id: 'search-1769943874937-6jp5ssh6h', item_id: 0, query: 'Pola & Bryson Find Your Way', activeDownloadsKeys: Array(1)}
+index.ts:148 [Popup] findByClientId found: {clientId: 'search-1769943874937-6jp5ssh6h', download: {…}}
+index.ts:183 [Popup] findEntry matched by client_id: {clientId: 'search-1769943874937-6jp5ssh6h'}
+index.ts:210 [Popup] search_started: updating existing entry {key: 'search-1769943874937-6jp5ssh6h', client_id: 'search-1769943874937-6jp5ssh6h'}
+useWebSocket.ts:22 WebSocket event: duplicate_found {type: 'duplicate_found', item_id: 103, filename: '1. Pola & Bryson - Find Your Way.flac', query: 'Pola & Bryson Find Your Way', client_id: 'search-1769943874937-6jp5ssh6h'}
+index.ts:135 [Popup] WS Event received: {type: 'duplicate_found', client_id: 'search-1769943874937-6jp5ssh6h', item_id: 103, query: 'Pola & Bryson Find Your Way', activeDownloadsKeys: Array(1)}
+index.ts:148 [Popup] findByClientId found: {clientId: 'search-1769943874937-6jp5ssh6h', download: {…}}
+index.ts:183 [Popup] findEntry matched by client_id: {clientId: 'search-1769943874937-6jp5ssh6h'}
+index.ts:421 [Popup] duplicate_found: updating existing entry {key: 'search-1769943874937-6jp5ssh6h', client_id: 'search-1769943874937-6jp5ssh6h', previousStage: 'searching'}
+index.ts:112 [Popup] addPendingSearch: {query: 'Pola & Bryson Find Your Way', clientId: 'search-1769943910627-ecpb0kcsk'}
+index.ts:112 [Popup] addPendingSearch: {query: 'NCT Frozen In Time', clientId: 'search-1769943910627-c9qbm5jbn'}
+useWebSocket.ts:22 WebSocket event: list_created {type: 'list_created', list_id: 9, name: 'New TESTING', total_items: 2}
+index.ts:135 [Popup] WS Event received: {type: 'list_created', client_id: undefined, item_id: undefined, query: undefined, activeDownloadsKeys: Array(3)}
+useWebSocket.ts:22 WebSocket event: list_created {type: 'list_created', list_id: 9, name: 'New TESTING', total_items: 2}
+index.ts:135 [Popup] WS Event received: {type: 'list_created', client_id: undefined, item_id: undefined, query: undefined, activeDownloadsKeys: Array(3)}
+useWebSocket.ts:22 WebSocket event: search_processing {type: 'search_processing', queue_id: 82, query: 'Pola & Bryson Find Your Way'}
+index.ts:135 [Popup] WS Event received: {type: 'search_processing', client_id: undefined, item_id: undefined, query: 'Pola & Bryson Find Your Way', activeDownloadsKeys: Array(3)}
+useWebSocket.ts:22 WebSocket event: search_started {type: 'search_started', item_id: 0, query: 'Pola & Bryson Find Your Way'}
+index.ts:135 [Popup] WS Event received: {type: 'search_started', client_id: undefined, item_id: 0, query: 'Pola & Bryson Find Your Way', activeDownloadsKeys: Array(3)}
+index.ts:196 [Popup] findEntry matched by query: {query: 'Pola & Bryson Find Your Way', allowedStages: Array(1)}
+index.ts:210 [Popup] search_started: updating existing entry {key: 'search-1769943910627-ecpb0kcsk', client_id: undefined}
+useWebSocket.ts:22 WebSocket event: duplicate_found {type: 'duplicate_found', item_id: 103, filename: '1. Pola & Bryson - Find Your Way.flac', query: 'Pola & Bryson Find Your Way'}
+index.ts:135 [Popup] WS Event received: {type: 'duplicate_found', client_id: undefined, item_id: 103, query: 'Pola & Bryson Find Your Way', activeDownloadsKeys: Array(3)}
+index.ts:189 [Popup] findEntry matched by itemId: {itemId: 103}
+index.ts:421 [Popup] duplicate_found: updating existing entry {key: 'search-1769943874937-6jp5ssh6h', client_id: undefined, previousStage: 'duplicate'}
+useWebSocket.ts:22 WebSocket event: list_progress {type: 'list_progress', list_id: 9, completed: 1, failed: 0, total: 2, …}
+index.ts:135 [Popup] WS Event received: {type: 'list_progress', client_id: undefined, item_id: undefined, query: undefined, activeDownloadsKeys: Array(3)}
+useWebSocket.ts:22 WebSocket event: search_processing {type: 'search_processing', queue_id: 82, query: 'Pola & Bryson Find Your Way'}
+index.ts:135 [Popup] WS Event received: {type: 'search_processing', client_id: undefined, item_id: undefined, query: 'Pola & Bryson Find Your Way', activeDownloadsKeys: Array(3)}
+useWebSocket.ts:22 WebSocket event: search_started {type: 'search_started', item_id: 0, query: 'Pola & Bryson Find Your Way'}
+index.ts:135 [Popup] WS Event received: {type: 'search_started', client_id: undefined, item_id: 0, query: 'Pola & Bryson Find Your Way', activeDownloadsKeys: Array(3)}
+index.ts:196 [Popup] findEntry matched by query: {query: 'Pola & Bryson Find Your Way', allowedStages: Array(1)}
+index.ts:210 [Popup] search_started: updating existing entry {key: 'search-1769943910627-ecpb0kcsk', client_id: undefined}
+useWebSocket.ts:22 WebSocket event: duplicate_found {type: 'duplicate_found', item_id: 103, filename: '1. Pola & Bryson - Find Your Way.flac', query: 'Pola & Bryson Find Your Way'}
+index.ts:135 [Popup] WS Event received: {type: 'duplicate_found', client_id: undefined, item_id: 103, query: 'Pola & Bryson Find Your Way', activeDownloadsKeys: Array(3)}
+index.ts:189 [Popup] findEntry matched by itemId: {itemId: 103}
+index.ts:421 [Popup] duplicate_found: updating existing entry {key: 'search-1769943874937-6jp5ssh6h', client_id: undefined, previousStage: 'duplicate'}
+useWebSocket.ts:22 WebSocket event: list_progress {type: 'list_progress', list_id: 9, completed: 1, failed: 0, total: 2, …}
+index.ts:135 [Popup] WS Event received: {type: 'list_progress', client_id: undefined, item_id: undefined, query: undefined, activeDownloadsKeys: Array(3)}
+useWebSocket.ts:22 WebSocket event: search_processing {type: 'search_processing', queue_id: 83, query: 'NCT Frozen In Time'}
+index.ts:135 [Popup] WS Event received: {type: 'search_processing', client_id: undefined, item_id: undefined, query: 'NCT Frozen In Time', activeDownloadsKeys: Array(3)}
+useWebSocket.ts:22 WebSocket event: search_started {type: 'search_started', item_id: 0, query: 'NCT Frozen In Time'}
+index.ts:135 [Popup] WS Event received: {type: 'search_started', client_id: undefined, item_id: 0, query: 'NCT Frozen In Time', activeDownloadsKeys: Array(3)}
+index.ts:196 [Popup] findEntry matched by query: {query: 'NCT Frozen In Time', allowedStages: Array(1)}
+index.ts:210 [Popup] search_started: updating existing entry {key: 'search-1769943910627-c9qbm5jbn', client_id: undefined}
+useWebSocket.ts:22 WebSocket event: duplicate_found {type: 'duplicate_found', item_id: 58, filename: '0479. NCT - Frozen In Time.mp3', query: 'NCT Frozen In Time'}
+index.ts:135 [Popup] WS Event received: {type: 'duplicate_found', client_id: undefined, item_id: 58, query: 'NCT Frozen In Time', activeDownloadsKeys: Array(3)}
+index.ts:196 [Popup] findEntry matched by query: {query: 'NCT Frozen In Time', allowedStages: undefined}
+index.ts:421 [Popup] duplicate_found: updating existing entry {key: 'search-1769943910627-c9qbm5jbn', client_id: undefined, previousStage: 'searching'}
+useWebSocket.ts:22 WebSocket event: list_progress {type: 'list_progress', list_id: 9, completed: 2, failed: 0, total: 2, …}
+index.ts:135 [Popup] WS Event received: {type: 'list_progress', client_id: undefined, item_id: undefined, query: undefined, activeDownloadsKeys: Array(3)}
+useWebSocket.ts:22 WebSocket event: search_processing {type: 'search_processing', queue_id: 83, query: 'NCT Frozen In Time'}
+index.ts:135 [Popup] WS Event received: {type: 'search_processing', client_id: undefined, item_id: undefined, query: 'NCT Frozen In Time', activeDownloadsKeys: Array(3)}
+useWebSocket.ts:22 WebSocket event: search_started {type: 'search_started', item_id: 0, query: 'NCT Frozen In Time'}
+index.ts:135 [Popup] WS Event received: {type: 'search_started', client_id: undefined, item_id: 0, query: 'NCT Frozen In Time', activeDownloadsKeys: Array(3)}
+index.ts:200 [Popup] findEntry NO MATCH: {clientId: undefined, itemId: 0, query: 'NCT Frozen In Time', allowedStages: Array(1)}
+index.ts:229 [Popup] search_started: creating new entry with generated id (no client_id!) {trackingId: 'search-1769943910864-6bzdhlsqq'}
+useWebSocket.ts:22 WebSocket event: duplicate_found {type: 'duplicate_found', item_id: 58, filename: '0479. NCT - Frozen In Time.mp3', query: 'NCT Frozen In Time'}
+index.ts:135 [Popup] WS Event received: {type: 'duplicate_found', client_id: undefined, item_id: 58, query: 'NCT Frozen In Time', activeDownloadsKeys: Array(4)}
+index.ts:189 [Popup] findEntry matched by itemId: {itemId: 58}
+index.ts:421 [Popup] duplicate_found: updating existing entry {key: 'search-1769943910627-c9qbm5jbn', client_id: undefined, previousStage: 'duplicate'}
+useWebSocket.ts:22 WebSocket event: list_progress {type: 'list_progress', list_id: 9, completed: 2, failed: 0, total: 2, …}
+index.ts:135 [Popup] WS Event received: {type: 'list_progress', client_id: undefined, item_id: undefined, query: undefined, activeDownloadsKeys: Array(4)}
+

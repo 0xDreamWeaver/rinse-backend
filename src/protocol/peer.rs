@@ -909,8 +909,6 @@ pub async fn wait_for_file_connection(
 ) -> Result<FileConnection> {
     tracing::info!("[DOWNLOAD] Waiting for F connection (token={})", transfer_token);
 
-    let mut indirect_info: Option<(String, u32, u32)> = None;
-
     let file_conn = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
         loop {
             tokio::select! {
@@ -939,11 +937,21 @@ pub async fn wait_for_file_connection(
                             let ip_bytes = [buf.get_u8(), buf.get_u8(), buf.get_u8(), buf.get_u8()];
                             let ip = format!("{}.{}.{}.{}", ip_bytes[3], ip_bytes[2], ip_bytes[1], ip_bytes[0]);
                             let port = buf.get_u32_le();
-                            let token = buf.get_u32_le();
+                            let indirect_token = buf.get_u32_le();
 
                             if conn_type == "F" && username == peer_username {
-                                tracing::info!("[DOWNLOAD] Got ConnectToPeer F from server");
-                                indirect_info = Some((ip, port, token));
+                                tracing::info!("[DOWNLOAD] Got ConnectToPeer F from server - connecting immediately to {}:{}", ip, port);
+                                // Try indirect connection IMMEDIATELY, not after timeout
+                                match connect_for_indirect_transfer(&ip, port, indirect_token, our_username).await {
+                                    Ok(conn) => {
+                                        tracing::info!("[DOWNLOAD] Indirect connection successful!");
+                                        return Ok(conn);
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("[DOWNLOAD] Indirect connection failed: {} - continuing to wait for direct", e);
+                                        // Continue waiting for direct connection as fallback
+                                    }
+                                }
                             }
                         }
                         Ok((code, _)) => {
@@ -961,15 +969,7 @@ pub async fn wait_for_file_connection(
     match file_conn {
         Ok(Ok(conn)) => Ok(conn),
         Ok(Err(e)) => bail!("F connection error: {}", e),
-        Err(_) => {
-            // Timeout - try indirect if we have info
-            if let Some((ip, port, indirect_token)) = indirect_info {
-                tracing::info!("[DOWNLOAD] Trying indirect connection to {}:{}", ip, port);
-                connect_for_indirect_transfer(&ip, port, indirect_token, our_username).await
-            } else {
-                bail!("Timeout waiting for file connection")
-            }
-        }
+        Err(_) => bail!("Timeout waiting for file connection"),
     }
 }
 
@@ -997,12 +997,8 @@ pub async fn download_file(
 
     tracing::debug!("[DOWNLOAD] Waiting for file connection (direct or indirect)...");
 
-    // First, try waiting for the peer to connect to us directly (preferred path)
-    // We use biased selection to PREFER direct connections over indirect
-    // This prevents race conditions where server sends ConnectToPeer F while peer also connects
-    let mut indirect_info: Option<(String, u32, u32)> = None; // (ip, port, indirect_token)
-
-    let file_conn = tokio::time::timeout(Duration::from_secs(20), async {
+    // Wait for file connection - either direct (peer connects to us) or indirect (server-brokered)
+    let file_conn = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             tokio::select! {
                 // BIASED: Prefer direct connections over indirect
@@ -1021,7 +1017,7 @@ pub async fn download_file(
                     }
                 }
 
-                // Check for ConnectToPeer type="F" from server (save for fallback)
+                // Check for ConnectToPeer type="F" from server - connect IMMEDIATELY
                 msg_result = read_message(server_stream) => {
                     match msg_result {
                         Ok((18, data)) => {
@@ -1031,12 +1027,20 @@ pub async fn download_file(
                             let ip_bytes = [buf.get_u8(), buf.get_u8(), buf.get_u8(), buf.get_u8()];
                             let ip = format!("{}.{}.{}.{}", ip_bytes[3], ip_bytes[2], ip_bytes[1], ip_bytes[0]);
                             let port = buf.get_u32_le();
-                            let token = buf.get_u32_le();
+                            let indirect_token = buf.get_u32_le();
 
                             if conn_type == "F" && username == peer_username {
-                                tracing::info!("[DOWNLOAD] Got ConnectToPeer F from server (saving as fallback)");
-                                indirect_info = Some((ip, port, token));
-                                // Don't immediately connect - wait a bit for direct connection
+                                tracing::info!("[DOWNLOAD] Got ConnectToPeer F from server - connecting immediately to {}:{}", ip, port);
+                                // Try indirect connection IMMEDIATELY
+                                match connect_for_indirect_transfer(&ip, port, indirect_token, our_username).await {
+                                    Ok(conn) => {
+                                        tracing::info!("[DOWNLOAD] Indirect connection successful!");
+                                        return Ok(conn);
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("[DOWNLOAD] Indirect connection failed: {} - continuing to wait", e);
+                                    }
+                                }
                             }
                         }
                         Ok((code, _)) => {
@@ -1062,59 +1066,7 @@ pub async fn download_file(
             bail!("File connection error: {}", e)
         }
         Err(_) => {
-            // Timeout waiting for direct connection
-            tracing::warn!("[DOWNLOAD] Timeout waiting for direct F connection.");
-
-            // If we received indirect connection info from server, try that now
-            if let Some((ip, port, indirect_token)) = indirect_info {
-                tracing::info!("[DOWNLOAD] Trying saved indirect connection to {}:{}", ip, port);
-                match connect_for_indirect_transfer(&ip, port, indirect_token, our_username).await {
-                    Ok(conn) => Ok(conn),
-                    Err(e) => {
-                        tracing::warn!("[DOWNLOAD] Indirect connection failed: {}", e);
-                        bail!("Both direct and indirect connections failed")
-                    }
-                }
-            } else {
-                // No indirect info, wait a bit longer for either path
-                tracing::info!("[DOWNLOAD] Waiting additional 10s for connection...");
-
-                match tokio::time::timeout(Duration::from_secs(10), async {
-                    loop {
-                        tokio::select! {
-                            biased;
-
-                            conn = file_conn_rx.recv() => {
-                                if let Some(conn) = conn {
-                                    if conn.transfer_token == transfer_token {
-                                        return Ok::<FileConnection, anyhow::Error>(conn);
-                                    }
-                                }
-                            }
-                            msg_result = read_message(server_stream) => {
-                                if let Ok((18, data)) = msg_result {
-                                    let mut buf = BytesMut::from(&data[..]);
-                                    let username = decode_string(&mut buf)?;
-                                    let conn_type = decode_string(&mut buf)?;
-                                    let ip_bytes = [buf.get_u8(), buf.get_u8(), buf.get_u8(), buf.get_u8()];
-                                    let ip = format!("{}.{}.{}.{}", ip_bytes[3], ip_bytes[2], ip_bytes[1], ip_bytes[0]);
-                                    let port = buf.get_u32_le();
-                                    let indirect_token = buf.get_u32_le();
-
-                                    if conn_type == "F" && username == peer_username {
-                                        tracing::info!("[DOWNLOAD] Got late ConnectToPeer F from server!");
-                                        let conn = connect_for_indirect_transfer(&ip, port, indirect_token, our_username).await?;
-                                        return Ok(conn);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }).await {
-                    Ok(Ok(conn)) => Ok(conn),
-                    _ => bail!("Timeout waiting for file connection - peer couldn't connect and server didn't broker. Try a different peer.")
-                }
-            }
+            bail!("Timeout waiting for file connection - peer couldn't connect and server didn't broker. Try a different peer.")
         }
     };
 

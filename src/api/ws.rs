@@ -16,12 +16,16 @@ pub enum WsEvent {
     SearchStarted {
         item_id: i64,
         query: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
     },
     /// Search progress update
     SearchProgress {
         item_id: i64,
         results_count: usize,
         users_count: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
     },
     /// Search completed
     SearchCompleted {
@@ -29,12 +33,16 @@ pub enum WsEvent {
         results_count: usize,
         selected_file: Option<String>,
         selected_user: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
     },
     /// Download has started
     DownloadStarted {
         item_id: i64,
         filename: String,
         total_bytes: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
     },
     /// Download progress update
     DownloadProgress {
@@ -43,23 +51,31 @@ pub enum WsEvent {
         total_bytes: u64,
         progress_pct: f64,
         speed_kbps: f64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
     },
     /// Download completed successfully
     DownloadCompleted {
         item_id: i64,
         filename: String,
         total_bytes: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
     },
     /// Download failed
     DownloadFailed {
         item_id: i64,
         error: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
     },
     /// Download was queued by peer
     DownloadQueued {
         item_id: i64,
         position: Option<u32>,
         reason: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
     },
     /// Item status changed (generic update)
     ItemUpdated {
@@ -73,6 +89,56 @@ pub enum WsEvent {
         item_id: i64,
         filename: String,
         query: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
+    },
+
+    // ========================================================================
+    // Queue-related events
+    // ========================================================================
+
+    /// Search has been added to the queue
+    SearchQueued {
+        queue_id: i64,
+        query: String,
+        position: i32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
+    },
+    /// Search is now being processed
+    SearchProcessing {
+        queue_id: i64,
+        query: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
+    },
+    /// Search failed (no results or error)
+    SearchFailed {
+        queue_id: i64,
+        query: String,
+        error: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
+    },
+    /// New list has been created
+    ListCreated {
+        list_id: i64,
+        name: String,
+        total_items: i32,
+    },
+    /// List progress update
+    ListProgress {
+        list_id: i64,
+        completed: i32,
+        failed: i32,
+        total: i32,
+        status: String,
+    },
+    /// Queue status update (periodic)
+    QueueStatus {
+        pending: i64,
+        processing: i64,
+        active_downloads: i64,
     },
 }
 
@@ -111,9 +177,19 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     // Subscribe to broadcast channel
     let mut rx = state.ws_broadcast.subscribe();
 
-    // Send initial status of all items
+    // Send initial status of only active/in-progress items (not completed ones)
+    // This prevents flooding the client with status updates for all historical items
     if let Ok(items) = state.download_service.get_all_items().await {
         for item in items {
+            // Only send items that are actively in progress
+            let is_active = matches!(
+                item.download_status.as_str(),
+                "pending" | "downloading" | "queued"
+            );
+            if !is_active {
+                continue;
+            }
+
             let update = WsEvent::ItemUpdated {
                 item_id: item.id,
                 filename: item.filename.clone(),

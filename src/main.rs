@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use db::Database;
-use services::{DownloadService, EmailService};
+use services::{DownloadService, EmailService, QueueService, QueueConfig};
 use api::{AppState, create_router, create_broadcast_channel};
 
 #[tokio::main]
@@ -94,11 +94,10 @@ async fn main() -> Result<()> {
     // Create WebSocket broadcast channel
     let (ws_broadcast, _ws_rx) = create_broadcast_channel();
 
-    // Initialize download service with broadcast sender
+    // Initialize download service (handles connection and CRUD operations)
     let download_service = Arc::new(DownloadService::new(
         db.clone(),
         PathBuf::from(&storage_path),
-        ws_broadcast.clone(),
     ));
 
     // Initialize UPnP port forwarding for incoming peer connections
@@ -125,10 +124,45 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Create queue service
+    let queue_config = QueueConfig {
+        poll_interval_ms: 500,
+        search_timeout_secs: 10,
+        storage_path: PathBuf::from(&storage_path),
+    };
+    let queue_service = Arc::new(QueueService::new(
+        db.clone(),
+        download_service.slsk_client(),  // Share the Soulseek client
+        ws_broadcast.clone(),
+        queue_config,
+    ));
+
+    // Perform recovery on startup (reset interrupted downloads)
+    tracing::info!("Running queue recovery...");
+    match queue_service.recover_on_startup().await {
+        Ok((searches_reset, downloads_failed)) => {
+            if searches_reset > 0 || downloads_failed > 0 {
+                tracing::info!(
+                    "Recovery complete: {} searches reset, {} interrupted downloads marked failed",
+                    searches_reset, downloads_failed
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Queue recovery failed: {}", e);
+        }
+    }
+
+    // Start queue worker and transfer monitor
+    tracing::info!("Starting queue worker and transfer monitor...");
+    let _queue_worker = queue_service.start_worker();
+    let _transfer_monitor = queue_service.start_transfer_monitor();
+
     // Create application state
     let state = AppState {
         db,
         download_service,
+        queue_service,
         jwt_secret,
         email_service,
         ws_broadcast,

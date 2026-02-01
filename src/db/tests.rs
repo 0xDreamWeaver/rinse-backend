@@ -12,7 +12,7 @@ mod tests {
     async fn test_create_and_get_user() -> Result<()> {
         let db = setup_test_db().await?;
 
-        let user = db.create_user("testuser", "hashed_password").await?;
+        let user = db.create_user_verified("testuser", "hashed_password").await?;
         assert_eq!(user.username, "testuser");
         assert_eq!(user.password_hash, "hashed_password");
 
@@ -27,8 +27,8 @@ mod tests {
     async fn test_create_duplicate_user_fails() -> Result<()> {
         let db = setup_test_db().await?;
 
-        db.create_user("testuser", "hash1").await?;
-        let result = db.create_user("testuser", "hash2").await;
+        db.create_user_verified("testuser", "hash1").await?;
+        let result = db.create_user_verified("testuser", "hash2").await;
         assert!(result.is_err());
 
         Ok(())
@@ -99,7 +99,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_and_get_list() -> Result<()> {
         let db = setup_test_db().await?;
-        let user = db.create_user("testuser", "hash").await?;
+        let user = db.create_user_verified("testuser", "hash").await?;
 
         let list = db.create_list("My Playlist", user.id, 5).await?;
         assert_eq!(list.name, "My Playlist");
@@ -115,7 +115,7 @@ mod tests {
     #[tokio::test]
     async fn test_add_item_to_list() -> Result<()> {
         let db = setup_test_db().await?;
-        let user = db.create_user("testuser", "hash").await?;
+        let user = db.create_user_verified("testuser", "hash").await?;
 
         let list = db.create_list("My List", user.id, 2).await?;
         let item1 = db.create_item("song1.mp3", "q1", "/tmp/1.mp3", 1000, None, None, "mp3", "u1").await?;
@@ -152,8 +152,8 @@ mod tests {
     #[tokio::test]
     async fn test_get_user_lists() -> Result<()> {
         let db = setup_test_db().await?;
-        let user1 = db.create_user("user1", "hash1").await?;
-        let user2 = db.create_user("user2", "hash2").await?;
+        let user1 = db.create_user_verified("user1", "hash1").await?;
+        let user2 = db.create_user_verified("user2", "hash2").await?;
 
         db.create_list("List 1", user1.id, 1).await?;
         db.create_list("List 2", user1.id, 2).await?;

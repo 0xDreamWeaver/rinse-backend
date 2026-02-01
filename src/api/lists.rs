@@ -11,7 +11,7 @@ use axum::body::Body;
 use axum::http::header;
 use std::io::Write;
 
-use crate::api::AppState;
+use crate::api::{AppState, AuthUser};
 use crate::models::{List, ListWithItems, SearchListRequest};
 
 /// Error response
@@ -26,14 +26,18 @@ pub struct BatchDeleteRequest {
     ids: Vec<i64>,
 }
 
+/// Batch remove items from list request
+#[derive(Deserialize)]
+pub struct BatchRemoveItemsRequest {
+    item_ids: Vec<i64>,
+}
+
 /// List all lists for a user
 pub async fn list_lists(
     State(state): State<AppState>,
+    user: AuthUser,
 ) -> Result<Json<Vec<List>>, Response> {
-    // For now, assume user_id = 1 (will be extracted from JWT later)
-    let user_id = 1;
-
-    let lists = state.download_service.get_user_lists(user_id)
+    let lists = state.download_service.get_user_lists(user.id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get lists: {}", e);
@@ -112,6 +116,53 @@ pub async fn batch_delete_lists(
 
     tracing::info!("=== BATCH DELETE LISTS SUCCESS ===");
     tracing::info!("Deleted {} lists", payload.ids.len());
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Remove a single item from a list (just removes the association, doesn't delete the item)
+pub async fn remove_item_from_list(
+    State(state): State<AppState>,
+    Path((list_id, item_id)): Path<(i64, i64)>,
+) -> Result<StatusCode, Response> {
+    tracing::info!("=== REMOVE ITEM FROM LIST REQUEST ===");
+    tracing::info!("List ID: {}, Item ID: {}", list_id, item_id);
+
+    state.download_service.remove_item_from_list(list_id, item_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("=== REMOVE ITEM FROM LIST FAILED ===");
+            tracing::error!("List ID: {}, Item ID: {} - Error: {}", list_id, item_id, e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
+                error: "Failed to remove item from list".to_string()
+            })).into_response()
+        })?;
+
+    tracing::info!("=== REMOVE ITEM FROM LIST SUCCESS ===");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Batch remove items from a list
+pub async fn batch_remove_items_from_list(
+    State(state): State<AppState>,
+    Path(list_id): Path<i64>,
+    Json(payload): Json<BatchRemoveItemsRequest>,
+) -> Result<StatusCode, Response> {
+    tracing::info!("=== BATCH REMOVE ITEMS FROM LIST REQUEST ===");
+    tracing::info!("List ID: {}, Item IDs: {:?}", list_id, payload.item_ids);
+
+    state.download_service.remove_items_from_list(list_id, payload.item_ids.clone())
+        .await
+        .map_err(|e| {
+            tracing::error!("=== BATCH REMOVE ITEMS FROM LIST FAILED ===");
+            tracing::error!("List ID: {}, Item IDs: {:?} - Error: {}", list_id, payload.item_ids, e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
+                error: "Failed to remove items from list".to_string()
+            })).into_response()
+        })?;
+
+    tracing::info!("=== BATCH REMOVE ITEMS FROM LIST SUCCESS ===");
+    tracing::info!("Removed {} items from list {}", payload.item_ids.len(), list_id);
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -224,42 +275,46 @@ pub async fn download_list(
     ).into_response())
 }
 
-/// Search for and download a list of items
-pub async fn search_list(
-    State(state): State<AppState>,
-    Json(payload): Json<SearchListRequest>,
-) -> Result<Json<List>, Response> {
-    // For now, assume user_id = 1 (will be extracted from JWT later)
-    let user_id = 1;
-
-    tracing::info!("=== LIST SEARCH REQUEST ===");
-    tracing::info!("List name: {:?}", payload.name);
-    tracing::info!("Query count: {}", payload.queries.len());
-    tracing::info!("Queries: {:?}", payload.queries);
-    tracing::info!("Format filter: {:?}", payload.format);
-    tracing::info!("User ID: {}", user_id);
-
-    let list = state.download_service.search_and_download_list(
-        payload.queries.clone(),
-        payload.name.clone(),
-        user_id,
-        payload.format.clone(),
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!("=== LIST SEARCH FAILED ===");
-        tracing::error!("List name: {:?} - Error: {}", payload.name, e);
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
-            error: e.to_string()
-        })).into_response()
-    })?;
-
-    tracing::info!("=== LIST SEARCH COMPLETED ===");
-    tracing::info!("List ID: {}", list.id);
-    tracing::info!("List name: {}", list.name);
-    tracing::info!("Status: {}", list.status);
-    tracing::info!("Completed: {}/{}", list.completed_items, list.total_items);
-    tracing::info!("Failed: {}", list.failed_items);
-
-    Ok(Json(list))
-}
+// =============================================================================
+// LEGACY ENDPOINT - COMMENTED OUT
+// Use POST /api/queue/list instead for non-blocking queue-based list search
+// =============================================================================
+// /// Search for and download a list of items
+// pub async fn search_list(
+//     State(state): State<AppState>,
+//     Json(payload): Json<SearchListRequest>,
+// ) -> Result<Json<List>, Response> {
+//     // For now, assume user_id = 1 (will be extracted from JWT later)
+//     let user_id = 1;
+//
+//     tracing::info!("=== LIST SEARCH REQUEST ===");
+//     tracing::info!("List name: {:?}", payload.name);
+//     tracing::info!("Query count: {}", payload.queries.len());
+//     tracing::info!("Queries: {:?}", payload.queries);
+//     tracing::info!("Format filter: {:?}", payload.format);
+//     tracing::info!("User ID: {}", user_id);
+//
+//     let list = state.download_service.search_and_download_list(
+//         payload.queries.clone(),
+//         payload.name.clone(),
+//         user_id,
+//         payload.format.clone(),
+//     )
+//     .await
+//     .map_err(|e| {
+//         tracing::error!("=== LIST SEARCH FAILED ===");
+//         tracing::error!("List name: {:?} - Error: {}", payload.name, e);
+//         (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
+//             error: e.to_string()
+//         })).into_response()
+//     })?;
+//
+//     tracing::info!("=== LIST SEARCH COMPLETED ===");
+//     tracing::info!("List ID: {}", list.id);
+//     tracing::info!("List name: {}", list.name);
+//     tracing::info!("Status: {}", list.status);
+//     tracing::info!("Completed: {}/{}", list.completed_items, list.total_items);
+//     tracing::info!("Failed: {}", list.failed_items);
+//
+//     Ok(Json(list))
+// }

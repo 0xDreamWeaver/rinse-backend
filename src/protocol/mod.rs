@@ -6,7 +6,10 @@ pub mod obfuscation;
 pub mod file_selection;
 pub mod peer;
 
-pub use client::{SoulseekClient, SearchResult, DownloadProgress, DownloadStatus, DownloadResult, PendingDownload};
+pub use client::{
+    SoulseekClient, SearchResult, DownloadProgress, DownloadStatus, DownloadResult,
+    PendingDownload, DownloadInitResult, TransferComplete, TransferCompleteSender,
+};
 pub use messages::*;
 pub use obfuscation::{obfuscate, deobfuscate};
 pub use file_selection::{
@@ -21,5 +24,5 @@ pub use peer::{
     encode_string as peer_encode_string, send_message, read_message,
     ParsedSearchResponse, parse_file_search_response, connect_to_peer_for_results,
     receive_search_results_from_peer,
-    ProgressCallback,
+    ProgressCallback, ArcProgressCallback,
 };

@@ -8,6 +8,78 @@ use std::collections::HashSet;
 use super::messages::SearchFile;
 use super::client::SearchResult;
 
+/// Remix/alternate version indicators that should be penalized
+/// (unless the query explicitly contains them)
+const REMIX_INDICATORS: &[&str] = &[
+    "remix",
+    "mix)",      // Catches "(... Mix)" patterns
+    "edit",
+    "version)",  // Catches "(... Version)" patterns
+    "instrumental",
+    "acapella",
+    "a cappella",
+    "radio edit",
+    "live",
+    "demo",
+    "vip",
+    "bootleg",
+    "cover",
+    "acoustic",
+];
+
+/// Bonus indicator - extended versions are preferred
+const EXTENDED_INDICATOR: &str = "extended";
+
+/// Penalty applied for remix/alternate versions (when not requested)
+const REMIX_PENALTY: f64 = 30.0;
+
+/// Bonus applied for extended versions
+const EXTENDED_BONUS: f64 = 10.0;
+
+/// Check if a string contains any remix indicators that are NOT present in the query
+/// Returns the penalty to apply (0.0 if no penalty, REMIX_PENALTY if remix indicator found)
+#[cfg_attr(test, allow(dead_code))]
+pub fn calculate_remix_penalty(filename: &str, query: &str) -> f64 {
+    let filename_lower = filename.to_lowercase();
+    let query_lower = query.to_lowercase();
+
+    for indicator in REMIX_INDICATORS {
+        // Check if filename contains this indicator
+        if filename_lower.contains(indicator) {
+            // Only penalize if the query does NOT contain this indicator
+            if !query_lower.contains(indicator) {
+                tracing::debug!(
+                    "[FileSelection] Remix penalty applied: '{}' contains '{}' but query doesn't",
+                    filename, indicator
+                );
+                return REMIX_PENALTY;
+            }
+        }
+    }
+
+    0.0
+}
+
+/// Check if filename contains "extended" and query doesn't explicitly exclude it
+/// Returns bonus points if extended version found
+#[cfg_attr(test, allow(dead_code))]
+pub fn calculate_extended_bonus(filename: &str, query: &str) -> f64 {
+    let filename_lower = filename.to_lowercase();
+    let query_lower = query.to_lowercase();
+
+    // Give bonus if filename has "extended"
+    // (user searching for extended will get even higher match via word overlap)
+    if filename_lower.contains(EXTENDED_INDICATOR) {
+        // Don't double-bonus if user explicitly searched for extended
+        // (they'll already get word overlap bonus)
+        if !query_lower.contains(EXTENDED_INDICATOR) {
+            return EXTENDED_BONUS;
+        }
+    }
+
+    0.0
+}
+
 /// Parse a search query in "{artist} - {title}" format
 /// Returns (artist, title) where either may be None
 pub fn parse_query(query: &str) -> (Option<String>, Option<String>) {
@@ -94,8 +166,15 @@ pub fn score_title_match(filename: &str, expected_title: &str) -> f64 {
 }
 
 /// Score a file for selection (higher is better)
-/// Considers: title match, format quality, bitrate
-pub fn score_file(filename: &str, size: u64, bitrate: Option<u32>, expected_title: &str) -> f64 {
+/// Considers: title match, format quality, bitrate, remix penalties, extended bonus
+///
+/// Parameters:
+/// - filename: The full filename/path from the search result
+/// - size: File size in bytes (currently unused, kept for future use)
+/// - bitrate: Optional bitrate for lossy formats
+/// - expected_title: The title portion of the search query
+/// - full_query: The complete original search query (for remix detection)
+pub fn score_file(filename: &str, _size: u64, bitrate: Option<u32>, expected_title: &str, full_query: &str) -> f64 {
     let mut score = 0.0;
 
     // Title match is most important (0-100 points)
@@ -148,11 +227,13 @@ pub fn score_file(filename: &str, size: u64, bitrate: Option<u32>, expected_titl
         }
     }
 
-    // Reasonable file size (1-50MB for a single track) gets a small bonus
-    let size_mb = size as f64 / 1_048_576.0;
-    if size_mb >= 1.0 && size_mb <= 50.0 {
-        score += 5.0;
-    }
+    // Remix penalty: penalize remixes/edits/etc. unless query explicitly asks for them
+    let remix_penalty = calculate_remix_penalty(filename, full_query);
+    score -= remix_penalty;
+
+    // Extended bonus: extended versions are generally preferred
+    let extended_bonus = calculate_extended_bonus(filename, full_query);
+    score += extended_bonus;
 
     score
 }
@@ -227,8 +308,6 @@ pub fn find_best_file(
         return None;
     }
 
-    let mut best: Option<ScoredFile> = None;
-
     // Collect all candidates first for logging
     let mut candidates: Vec<ScoredFile> = Vec::new();
 
@@ -243,12 +322,12 @@ pub fn find_best_file(
                 continue;
             }
 
-            let base_score = score_file(&file.filename, file.size, file.bitrate(), &title_to_match);
+            let base_score = score_file(&file.filename, file.size, file.bitrate(), &title_to_match, query);
 
-            // Add speed bonus (0-20 points based on upload speed)
+            // Add speed bonus (0-25 points based on upload speed)
             // 1 MB/s (1024 KB/s) = full bonus, scale linearly
             let speed_kbps = result.avg_speed as f64 / 1024.0;
-            let speed_bonus = (speed_kbps / 1024.0).min(1.0) * 20.0;
+            let speed_bonus = (speed_kbps / 1024.0).min(1.0) * 25.0;
 
             // Small penalty for longer queues (0-5 points)
             let queue_penalty = (result.queue_length as f64 / 10.0).min(5.0);
@@ -386,5 +465,58 @@ mod tests {
         assert!(is_audio_file("audio.wav"));
         assert!(!is_audio_file("cover.jpg"));
         assert!(!is_audio_file("readme.txt"));
+    }
+
+    #[test]
+    fn test_remix_penalty_applied() {
+        // Query doesn't mention remix, file has remix indicator
+        let penalty = calculate_remix_penalty("Block Rockin Beats (Micronauts Mix).mp3", "Block Rockin Beats");
+        assert_eq!(penalty, REMIX_PENALTY);
+    }
+
+    #[test]
+    fn test_remix_penalty_not_applied_when_query_has_indicator() {
+        // Query mentions "mix", file has "mix" - no penalty
+        let penalty = calculate_remix_penalty("Block Rockin Beats (Micronauts Mix).mp3", "Block Rockin Beats Micronauts Mix");
+        assert_eq!(penalty, 0.0);
+    }
+
+    #[test]
+    fn test_remix_penalty_not_applied_to_original() {
+        // No remix indicator in filename
+        let penalty = calculate_remix_penalty("Block Rockin Beats.mp3", "Block Rockin Beats");
+        assert_eq!(penalty, 0.0);
+    }
+
+    #[test]
+    fn test_extended_bonus_applied() {
+        // Extended version gets bonus when query doesn't ask for it
+        let bonus = calculate_extended_bonus("Track Name (Extended).mp3", "Track Name");
+        assert_eq!(bonus, EXTENDED_BONUS);
+    }
+
+    #[test]
+    fn test_extended_bonus_not_doubled_when_query_asks() {
+        // No extra bonus when user explicitly searches for extended
+        let bonus = calculate_extended_bonus("Track Name (Extended).mp3", "Track Name Extended");
+        assert_eq!(bonus, 0.0);
+    }
+
+    #[test]
+    fn test_original_beats_remix() {
+        // Original should score higher than remix for basic query
+        let query = "Block Rockin Beats";
+        let original_score = score_file("Block Rockin Beats.mp3", 5_000_000, Some(320), "Block Rockin Beats", query);
+        let remix_score = score_file("Block Rockin Beats (Micronauts Mix).mp3", 5_000_000, Some(320), "Block Rockin Beats", query);
+        assert!(original_score > remix_score, "Original ({}) should beat remix ({})", original_score, remix_score);
+    }
+
+    #[test]
+    fn test_correct_remix_beats_wrong_remix() {
+        // When searching for specific remix, correct one should win
+        let query = "Block Rockin Beats Micronauts Mix";
+        let correct_remix = score_file("Block Rockin Beats (Micronauts Mix).mp3", 5_000_000, Some(320), "Block Rockin Beats Micronauts Mix", query);
+        let wrong_remix = score_file("Block Rockin Beats (Souberian Edit).mp3", 5_000_000, Some(320), "Block Rockin Beats Micronauts Mix", query);
+        assert!(correct_remix > wrong_remix, "Correct remix ({}) should beat wrong remix ({})", correct_remix, wrong_remix);
     }
 }
