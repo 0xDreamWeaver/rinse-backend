@@ -5,7 +5,10 @@
 
 use anyhow::{Result, bail, Context};
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use lru::LruCache;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tokio::net::{TcpStream, TcpListener};
@@ -30,6 +33,13 @@ pub const PEER_OBFUSCATED_PORT: u16 = 2235;
 
 const SERVER_HOST: &str = "server.slsknet.org";
 const SERVER_PORT: u16 = 2242;
+
+/// Maximum number of peer connections to cache for potential downloads
+/// This prevents file descriptor exhaustion from accumulating connections
+const MAX_CACHED_PEER_CONNECTIONS: usize = 100;
+
+/// Counter for tracking active connection handler tasks (for diagnostics)
+static ACTIVE_HANDLERS: AtomicU32 = AtomicU32::new(0);
 
 /// Search result from the network
 #[derive(Debug, Clone)]
@@ -168,7 +178,8 @@ pub struct SoulseekClient {
     /// Sender for F connections (used by listener)
     file_conn_tx: mpsc::Sender<FileConnection>,
     /// Stored peer streams for download (username -> stream)
-    peer_streams: Arc<Mutex<HashMap<String, TcpStream>>>,
+    /// Uses LRU cache to prevent file descriptor exhaustion
+    peer_streams: Arc<Mutex<LruCache<String, TcpStream>>>,
     /// Incoming search results from listener (peers connecting to us)
     incoming_results: Arc<Mutex<Vec<SearchResult>>>,
     /// Download progress tracking
@@ -187,6 +198,9 @@ impl SoulseekClient {
         let mut stream = TcpStream::connect(&addr)
             .await
             .context("Failed to connect to Soulseek server")?;
+
+        // Disable Nagle's algorithm for immediate packet sending (matches Nicotine+)
+        stream.set_nodelay(true)?;
 
         // Login
         Self::login(&mut stream, username, password).await?;
@@ -207,7 +221,9 @@ impl SoulseekClient {
             username: username.to_string(),
             file_conn_rx: Arc::new(Mutex::new(file_conn_rx)),
             file_conn_tx,
-            peer_streams: Arc::new(Mutex::new(HashMap::new())),
+            peer_streams: Arc::new(Mutex::new(LruCache::new(
+                NonZeroUsize::new(MAX_CACHED_PEER_CONNECTIONS).unwrap()
+            ))),
             incoming_results: Arc::new(Mutex::new(Vec::new())),
             downloads: Arc::new(Mutex::new(HashMap::new())),
             pending_downloads: Arc::new(Mutex::new(HashMap::new())),
@@ -311,6 +327,10 @@ impl SoulseekClient {
             loop {
                 match listener.accept().await {
                     Ok((stream, addr)) => {
+                        // Disable Nagle's algorithm for immediate packet sending (matches Nicotine+)
+                        if let Err(e) = stream.set_nodelay(true) {
+                            tracing::warn!("[Listener] Failed to set TCP_NODELAY: {}", e);
+                        }
                         tracing::info!("[Listener] Accepted connection from {} on {} port", addr, port_label);
 
                         let file_conn_tx = file_conn_tx.clone();
@@ -323,10 +343,21 @@ impl SoulseekClient {
                         let port_label_owned = port_label.to_string();
 
                         tokio::spawn(async move {
-                            match handle_incoming_connection(stream, &our_username).await {
+                            let active = ACTIVE_HANDLERS.fetch_add(1, Ordering::Relaxed) + 1;
+                            tracing::debug!("[Listener] Handler started, active_handlers={}", active);
+
+                            let task_start = std::time::Instant::now();
+                            let handshake_start = std::time::Instant::now();
+                            let handshake_result = handle_incoming_connection(stream, &our_username).await;
+                            let handshake_duration = handshake_start.elapsed();
+
+                            match handshake_result {
                                 Ok(IncomingConnection::File(conn)) => {
                                     let token = conn.transfer_token;
-                                    tracing::info!("[Listener] F connection from {} ({}), token={}", addr, port_label_owned, token);
+                                    tracing::info!(
+                                        "[Listener] F connection from {} ({}), token={}, handshake={:?}",
+                                        addr, port_label_owned, token, handshake_duration
+                                    );
 
                                     // Check if this matches a pending (queued) download
                                     let pending = pending_downloads.lock().await.remove(&token);
@@ -421,21 +452,28 @@ impl SoulseekClient {
                                     }
                                 }
                                 Ok(IncomingConnection::Peer(mut stream, peer_username, _token)) => {
-                                    tracing::info!("[Listener] P connection from '{}' ({}, {})", peer_username, addr, port_label_owned);
+                                    tracing::info!(
+                                        "[Listener] P connection from '{}' ({}, {}), handshake={:?}",
+                                        peer_username, addr, port_label_owned, handshake_duration
+                                    );
 
                                     // Try to receive search results
+                                    let recv_start = std::time::Instant::now();
                                     match receive_search_results_from_peer(&mut stream).await {
                                         Ok(response) => {
+                                            let recv_duration = recv_start.elapsed();
                                             tracing::info!(
-                                                "[Listener] Got {} files from '{}' ({}, {:.0} KB/s)",
+                                                "[Listener] Got {} files from '{}' ({}, {:.0} KB/s), recv={:?}, total={:?}",
                                                 response.files.len(),
                                                 peer_username,
                                                 if response.slot_free { "FREE" } else { "BUSY" },
-                                                response.avg_speed as f64 / 1024.0
+                                                response.avg_speed as f64 / 1024.0,
+                                                recv_duration,
+                                                task_start.elapsed()
                                             );
 
                                             // Store stream for potential download
-                                            peer_streams.lock().await.insert(peer_username.clone(), stream);
+                                            peer_streams.lock().await.put(peer_username.clone(), stream);
 
                                             // Store result for search aggregation
                                             let search_result = SearchResult {
@@ -464,16 +502,29 @@ impl SoulseekClient {
                                             incoming_results.lock().await.push(search_result);
                                         }
                                         Err(e) => {
-                                            tracing::debug!("[Listener] No results from '{}': {}", peer_username, e);
-                                            // Still store connection
-                                            peer_streams.lock().await.insert(peer_username, stream);
+                                            let recv_duration = recv_start.elapsed();
+                                            tracing::debug!(
+                                                "[Listener] No results from '{}': {}, recv={:?}, total={:?}",
+                                                peer_username, e, recv_duration, task_start.elapsed()
+                                            );
+                                            // Don't store connection - we won't download from peers with no results
+                                            // The stream will be dropped and connection closed
                                         }
                                     }
                                 }
                                 Err(e) => {
-                                    tracing::debug!("[Listener] Connection from {} failed handshake: {}", addr, e);
+                                    tracing::debug!(
+                                        "[Listener] Connection from {} failed handshake: {}, handshake={:?}",
+                                        addr, e, handshake_duration
+                                    );
                                 }
                             }
+
+                            let remaining = ACTIVE_HANDLERS.fetch_sub(1, Ordering::Relaxed) - 1;
+                            tracing::debug!(
+                                "[Listener] Handler finished, active_handlers={}, total_time={:?}",
+                                remaining, task_start.elapsed()
+                            );
                         });
                     }
                     Err(e) => {
@@ -501,6 +552,9 @@ impl SoulseekClient {
 
         // Channel for collecting results from background ConnectToPeer tasks
         let (result_tx, mut result_rx) = mpsc::channel::<(String, String, u32, TcpStream, ParsedSearchResponse)>(50);
+
+        // Channel for collecting failed connections (to send CantConnectToPeer)
+        let (failure_tx, mut failure_rx) = mpsc::channel::<(u32, String)>(100);
 
         let mut results: Vec<SearchResult> = Vec::new();
         let mut connect_to_peer_count = 0;
@@ -557,6 +611,7 @@ impl SoulseekClient {
 
                         // Spawn ConnectToPeer attempt in background so we don't block the search loop
                         let tx = result_tx.clone();
+                        let fail_tx = failure_tx.clone();
                         let our_username = self.username.clone();
                         let ip_clone = ip.clone();
                         let peer_username_clone = peer_username.clone();
@@ -575,6 +630,8 @@ impl SoulseekClient {
                                 }
                                 Err(e) => {
                                     tracing::info!("[Search] Failed to get results from '{}': {}", peer_username_clone, e);
+                                    // Report failure for CantConnectToPeer (Nicotine+ does this)
+                                    let _ = fail_tx.send((peer_token, peer_username_clone)).await;
                                 }
                             }
                         });
@@ -584,7 +641,9 @@ impl SoulseekClient {
 
                         // Handle in background
                         let file_tx = self.file_conn_tx.clone();
+                        let fail_tx = failure_tx.clone();
                         let our_username = self.username.clone();
+                        let peer_username_clone = peer_username.clone();
                         tokio::spawn(async move {
                             match super::peer::connect_for_indirect_transfer(&ip, port, peer_token, &our_username).await {
                                 Ok(conn) => {
@@ -592,6 +651,8 @@ impl SoulseekClient {
                                 }
                                 Err(e) => {
                                     tracing::debug!("[Search] Indirect F failed: {}", e);
+                                    // Report failure for CantConnectToPeer
+                                    let _ = fail_tx.send((peer_token, peer_username_clone)).await;
                                 }
                             }
                         });
@@ -612,7 +673,8 @@ impl SoulseekClient {
             // Check for completed ConnectToPeer results (non-blocking)
             while let Ok((peer_username, ip, port, peer_stream, response)) = result_rx.try_recv() {
                 // Store peer stream for later download
-                self.peer_streams.lock().await.insert(peer_username.clone(), peer_stream);
+                tracing::debug!("[Search] Storing P connection for '{}' (has {} files)", peer_username, response.files.len());
+                self.peer_streams.lock().await.put(peer_username.clone(), peer_stream);
                 // Convert to SearchResult
                 results.push(Self::convert_response(&peer_username, &ip, port, &response));
                 last_result_time = std::time::Instant::now();
@@ -621,29 +683,61 @@ impl SoulseekClient {
 
         // Drop the sender so remaining tasks don't block
         drop(result_tx);
+        tracing::debug!("[Search] Dropped result_tx, entering grace period collection");
 
         // Collect any final results from background tasks (with short grace period)
+        let mut grace_results = 0;
         let grace_end = std::time::Instant::now() + Duration::from_millis(500);
         while std::time::Instant::now() < grace_end {
             match tokio::time::timeout(Duration::from_millis(100), result_rx.recv()).await {
                 Ok(Some((peer_username, ip, port, peer_stream, response))) => {
-                    self.peer_streams.lock().await.insert(peer_username.clone(), peer_stream);
+                    tracing::debug!("[Search] Grace period: storing P connection for '{}' ({} files)", peer_username, response.files.len());
+                    self.peer_streams.lock().await.put(peer_username.clone(), peer_stream);
                     results.push(Self::convert_response(&peer_username, &ip, port, &response));
+                    grace_results += 1;
                 }
                 _ => break,
             }
+        }
+        if grace_results > 0 {
+            tracing::debug!("[Search] Collected {} results during grace period", grace_results);
         }
 
         // Collect incoming results from listener (peers that connected to us)
         let incoming = self.incoming_results.lock().await.drain(..).collect::<Vec<_>>();
         let incoming_count = incoming.len();
+        tracing::debug!("[Search] Collected {} incoming results from listener", incoming_count);
         results.extend(incoming);
 
+        // Drop failure sender and drain failure channel to send CantConnectToPeer messages
+        drop(failure_tx);
+        let mut cant_connect_count = 0;
+        while let Ok(Some((token, username))) = tokio::time::timeout(
+            Duration::from_millis(10),
+            failure_rx.recv()
+        ).await {
+            if let Err(e) = super::peer::send_cant_connect_to_peer(
+                &mut self.server_stream,
+                token,
+                &username,
+            ).await {
+                tracing::debug!("[Search] Failed to send CantConnectToPeer for '{}': {}", username, e);
+            } else {
+                cant_connect_count += 1;
+            }
+        }
+        if cant_connect_count > 0 {
+            tracing::debug!("[Search] Sent {} CantConnectToPeer messages", cant_connect_count);
+        }
+
+        // Final summary
+        let cached_peers = self.peer_streams.lock().await.len();
         tracing::info!("[SoulseekClient] === SEARCH COMPLETE ===");
         tracing::info!("[SoulseekClient] ConnectToPeer messages: {}", connect_to_peer_count);
         tracing::info!("[SoulseekClient] Incoming connections: {}", incoming_count);
         tracing::info!("[SoulseekClient] Total results: {} users", results.len());
         tracing::info!("[SoulseekClient] Total files: {}", results.iter().map(|r| r.files.len()).sum::<usize>());
+        tracing::info!("[SoulseekClient] Cached peer connections: {}", cached_peers);
 
         Ok(results)
     }
@@ -719,7 +813,7 @@ impl SoulseekClient {
         // Get stored P connection from search phase
         // The peer connected to US during search (they can reach us via UPnP)
         // This is critical - we can't connect to most peers due to their firewalls
-        let stored_stream = self.peer_streams.lock().await.remove(username);
+        let stored_stream = self.peer_streams.lock().await.pop(username);
 
         let mut peer_stream = match stored_stream {
             Some(stream) => {
@@ -933,10 +1027,11 @@ impl SoulseekClient {
         completion_tx: TransferCompleteSender,
     ) -> DownloadInitResult {
         tracing::info!(
-            "[Download] Initiating download from '{}' (item_id={}, queue_id={})",
-            username, item_id, queue_id
+            "[Download] === INITIATE DOWNLOAD START === item_id={}, queue_id={}",
+            item_id, queue_id
         );
-        tracing::info!("[Download] File: {}", filename);
+        tracing::info!("[Download] User: '{}', IP: {}, Port: {}", username, peer_ip, peer_port);
+        tracing::info!("[Download] File: {} ({} bytes)", filename, filesize);
 
         // Update internal status to pending
         {
@@ -950,22 +1045,39 @@ impl SoulseekClient {
         }
 
         // Step 1: Get or establish P connection with peer
-        let stored_stream = self.peer_streams.lock().await.remove(username);
+        tracing::debug!("[Download] Step 1: Getting P connection for '{}'", username);
+        let cached_count = self.peer_streams.lock().await.len();
+        tracing::debug!("[Download] peer_streams cache has {} entries", cached_count);
+        let stored_stream = self.peer_streams.lock().await.pop(username);
 
         let mut peer_stream = match stored_stream {
             Some(stream) => {
-                tracing::info!("[Download] Using stored P connection from search");
+                tracing::info!("[Download] Using stored P connection from search for '{}'", username);
                 stream
             }
             None => {
-                tracing::info!("[Download] No stored P connection, attempting direct connection");
+                tracing::info!("[Download] No stored P connection for '{}', attempting direct connection", username);
+                tracing::debug!("[Download] Available peers in cache: {:?}",
+                    self.peer_streams.lock().await.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>());
 
                 let (final_ip, final_port) = if !peer_ip.is_empty() && peer_port > 0 {
+                    tracing::debug!("[Download] Using provided address: {}:{}", peer_ip, peer_port);
                     (peer_ip.to_string(), peer_port)
                 } else {
+                    tracing::debug!("[Download] No address provided, requesting from server");
                     match self.get_peer_address(username).await {
-                        Ok((ip, port)) if port > 0 => (ip, port),
-                        _ => {
+                        Ok((ip, port)) if port > 0 => {
+                            tracing::debug!("[Download] Got address from server: {}:{}", ip, port);
+                            (ip, port)
+                        }
+                        Ok((ip, port)) => {
+                            tracing::debug!("[Download] Server returned invalid address: {}:{}", ip, port);
+                            let reason = "No stored P connection and cannot get peer address".to_string();
+                            self.update_download_status(filename, DownloadStatus::Failed(reason.clone())).await;
+                            return DownloadInitResult::Failed { reason };
+                        }
+                        Err(e) => {
+                            tracing::debug!("[Download] Failed to get address from server: {}", e);
                             let reason = "No stored P connection and cannot get peer address".to_string();
                             self.update_download_status(filename, DownloadStatus::Failed(reason.clone())).await;
                             return DownloadInitResult::Failed { reason };
@@ -973,12 +1085,14 @@ impl SoulseekClient {
                     }
                 };
 
+                tracing::debug!("[Download] Connecting to peer at {}:{}", final_ip, final_port);
                 match self.connect_to_peer_for_download(username, &final_ip, final_port).await {
                     Ok(stream) => {
-                        tracing::info!("[Download] Direct P connection established");
+                        tracing::info!("[Download] Direct P connection established to '{}'", username);
                         stream
                     }
                     Err(e) => {
+                        tracing::info!("[Download] Direct P connection FAILED to '{}': {}", username, e);
                         let reason = format!("Failed to connect to peer: {}", e);
                         self.update_download_status(filename, DownloadStatus::Failed(reason.clone())).await;
                         return DownloadInitResult::Failed { reason };
@@ -988,18 +1102,24 @@ impl SoulseekClient {
         };
 
         // Step 2: Send QueueUpload request
-        tracing::info!("[Download] Sending QueueUpload for '{}'...", filename);
+        tracing::info!("[Download] Step 2: Sending QueueUpload for '{}'", filename);
         if let Err(e) = queue_upload(&mut peer_stream, filename).await {
+            tracing::info!("[Download] QueueUpload FAILED: {}", e);
             let reason = format!("Failed to send QueueUpload: {}", e);
             self.update_download_status(filename, DownloadStatus::Failed(reason.clone())).await;
             return DownloadInitResult::Failed { reason };
         }
+        tracing::debug!("[Download] QueueUpload sent successfully");
 
         // Step 3: Wait for TransferRequest and send TransferReply
-        tracing::info!("[Download] Waiting for peer's TransferRequest...");
+        tracing::info!("[Download] Step 3: Waiting for peer's TransferRequest (60s timeout)...");
         let negotiation = match wait_for_transfer_request(&mut peer_stream, filename, 60).await {
-            Ok(result) => result,
+            Ok(result) => {
+                tracing::debug!("[Download] Negotiation result: {:?}", result);
+                result
+            }
             Err(e) => {
+                tracing::info!("[Download] Negotiation FAILED: {}", e);
                 let reason = format!("Negotiation failed: {}", e);
                 self.update_download_status(filename, DownloadStatus::Failed(reason.clone())).await;
                 return DownloadInitResult::Failed { reason };
@@ -1007,13 +1127,14 @@ impl SoulseekClient {
         };
 
         // Release P connection - negotiation is complete
+        tracing::debug!("[Download] Releasing P connection after negotiation");
         drop(peer_stream);
 
         // Handle negotiation result
         match negotiation {
             NegotiationResult::Allowed { filesize: actual_size, transfer_token } => {
                 tracing::info!(
-                    "[Download] Transfer ALLOWED: size={} bytes, token={}",
+                    "[Download] Step 4: Transfer ALLOWED - size={} bytes, token={}",
                     actual_size, transfer_token
                 );
 
@@ -1026,13 +1147,14 @@ impl SoulseekClient {
                     }
                 }
 
-                // Step 4: Wait for F connection (direct or server-brokered)
+                // Step 5: Wait for F connection (direct or server-brokered)
                 // This is critical - we must actively wait for the connection,
                 // not just register and hope the listener catches it
-                tracing::info!("[Download] Waiting for F connection (token={})...", transfer_token);
+                tracing::info!("[Download] Step 5: Waiting for F connection (token={}, 30s timeout)...", transfer_token);
 
                 let file_conn = {
                     let mut file_conn_rx = self.file_conn_rx.lock().await;
+                    tracing::debug!("[Download] Acquired file_conn_rx lock, calling wait_for_file_connection");
                     super::peer::wait_for_file_connection(
                         &mut self.server_stream,
                         username,
@@ -1045,14 +1167,15 @@ impl SoulseekClient {
 
                 match file_conn {
                     Ok(conn) => {
-                        tracing::info!("[Download] F connection established, spawning file transfer");
+                        tracing::info!("[Download] Step 6: F connection established (token={}), spawning file transfer", conn.transfer_token);
 
-                        // Step 5: Spawn file receive as background task
+                        // Step 6: Spawn file receive as background task
                         let output_path = output_path.to_path_buf();
                         let downloads_clone = Arc::clone(&self.downloads);
                         let filename_clone = filename.to_string();
 
                         tokio::spawn(async move {
+                            tracing::info!("[Transfer] Starting receive_file_data for '{}'", filename_clone);
                             let result = super::peer::receive_file_data(
                                 conn,
                                 actual_size,
@@ -1063,7 +1186,7 @@ impl SoulseekClient {
                             // Update download status
                             match &result {
                                 Ok(bytes) => {
-                                    tracing::info!("[Transfer] Complete: {} bytes", bytes);
+                                    tracing::info!("[Transfer] === DOWNLOAD COMPLETE === {} bytes for '{}'", bytes, filename_clone);
                                     let mut dl = downloads_clone.lock().await;
                                     if let Some(p) = dl.get_mut(&filename_clone) {
                                         p.status = DownloadStatus::Completed;
@@ -1071,7 +1194,7 @@ impl SoulseekClient {
                                     }
                                 }
                                 Err(e) => {
-                                    tracing::error!("[Transfer] Failed: {}", e);
+                                    tracing::error!("[Transfer] === DOWNLOAD FAILED === '{}': {}", filename_clone, e);
                                     let mut dl = downloads_clone.lock().await;
                                     if let Some(p) = dl.get_mut(&filename_clone) {
                                         p.status = DownloadStatus::Failed(e.to_string());
@@ -1090,6 +1213,7 @@ impl SoulseekClient {
                             }).await;
                         });
 
+                        tracing::info!("[Download] === INITIATE DOWNLOAD END === TransferSpawned for item_id={}", item_id);
                         DownloadInitResult::TransferSpawned {
                             item_id,
                             transfer_token,
@@ -1097,7 +1221,7 @@ impl SoulseekClient {
                     }
                     Err(e) => {
                         let reason = format!("Failed to establish F connection: {}", e);
-                        tracing::error!("[Download] {}", reason);
+                        tracing::error!("[Download] === INITIATE DOWNLOAD FAILED === F connection error: {}", reason);
                         self.update_download_status(filename, DownloadStatus::Failed(reason.clone())).await;
 
                         // Notify of failure
@@ -1177,15 +1301,17 @@ impl SoulseekClient {
         if peer_port > 0 && !peer_ip.is_empty() && peer_ip != "0.0.0.0" {
             tracing::info!("[Download] Connecting directly to {}:{}", peer_ip, peer_port);
             let addr = format!("{}:{}", peer_ip, peer_port);
-            let stream = tokio::time::timeout(
+            let mut stream = tokio::time::timeout(
                 Duration::from_secs(10),
                 TcpStream::connect(&addr)
             ).await
                 .context("Connection timeout")?
                 .context("Connection failed")?;
 
+            // Disable Nagle's algorithm for immediate packet sending (matches Nicotine+)
+            stream.set_nodelay(true)?;
+
             // Send PeerInit
-            let mut stream = stream;
             super::peer::send_peer_init(&mut stream, &self.username, "P", 0).await?;
 
             return Ok(stream);
@@ -1237,15 +1363,17 @@ impl SoulseekClient {
 
                         // Connect to peer
                         let addr = format!("{}:{}", ip, port);
-                        let stream = tokio::time::timeout(
+                        let mut stream = tokio::time::timeout(
                             Duration::from_secs(10),
                             TcpStream::connect(&addr)
                         ).await
                             .context("Connection timeout")?
                             .context("Connection failed")?;
 
+                        // Disable Nagle's algorithm for immediate packet sending (matches Nicotine+)
+                        stream.set_nodelay(true)?;
+
                         // Send PeerInit
-                        let mut stream = stream;
                         super::peer::send_peer_init(&mut stream, &self.username, "P", 0).await?;
 
                         return Ok(stream);
@@ -1449,6 +1577,9 @@ impl SoulseekClient {
         ).await
             .context("Connection timeout")?
             .context("Connection failed")?;
+
+        // Disable Nagle's algorithm for immediate packet sending (matches Nicotine+)
+        stream.set_nodelay(true)?;
 
         tracing::debug!("[Download] Connected, sending PeerInit type F");
 

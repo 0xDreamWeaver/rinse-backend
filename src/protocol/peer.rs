@@ -61,7 +61,7 @@ pub async fn send_peer_init(
     stream: &mut TcpStream,
     username: &str,
     conn_type: &str,
-    token: u32,
+    _token: u32,  // Ignored - protocol spec says token is always 0
 ) -> std::io::Result<()> {
     let msg_len = 1 + 4 + username.len() + 4 + conn_type.len() + 4;
     stream.write_u32_le(msg_len as u32).await?;
@@ -70,7 +70,9 @@ pub async fn send_peer_init(
     stream.write_all(username.as_bytes()).await?;
     stream.write_u32_le(conn_type.len() as u32).await?;
     stream.write_all(conn_type.as_bytes()).await?;
-    stream.write_u32_le(token).await?;
+    // Token is always 0 per protocol spec (Nicotine+ does the same)
+    // "The token is always zero and ignored today"
+    stream.write_u32_le(0).await?;
     stream.flush().await?;
     Ok(())
 }
@@ -83,6 +85,31 @@ pub async fn send_pierce_firewall(stream: &mut TcpStream, token: u32) -> std::io
     stream.write_u8(0).await?; // type = 0 (PierceFirewall)
     stream.write_u32_le(token).await?;
     stream.flush().await?;
+    Ok(())
+}
+
+/// Send CantConnectToPeer to server when we fail to connect to a peer
+///
+/// This tells the server that the indirect connection attempt failed,
+/// allowing it to clean up and potentially try alternative routing.
+///
+/// Format: [length:u32][code=1001:u32][token:u32][username:string]
+pub async fn send_cant_connect_to_peer(
+    server_stream: &mut TcpStream,
+    token: u32,
+    username: &str,
+) -> std::io::Result<()> {
+    let mut data = BytesMut::new();
+    data.put_u32_le(token);
+    encode_string(&mut data, username);
+
+    let msg_len = 4 + data.len();  // code (4 bytes) + data
+    server_stream.write_u32_le(msg_len as u32).await?;
+    server_stream.write_u32_le(1001).await?;  // CantConnectToPeer code
+    server_stream.write_all(&data).await?;
+    server_stream.flush().await?;
+
+    tracing::debug!("[CantConnectToPeer] Sent for '{}' (token={})", username, token);
     Ok(())
 }
 
@@ -255,6 +282,9 @@ pub async fn connect_for_indirect_transfer(
         Duration::from_secs(10),
         TcpStream::connect(&addr)
     ).await??;
+
+    // Disable Nagle's algorithm for immediate packet sending (matches Nicotine+)
+    stream.set_nodelay(true)?;
 
     tracing::debug!("[INDIRECT] Connected, sending PierceFirewall with token {}", indirect_token);
 
@@ -446,6 +476,7 @@ pub async fn connect_to_peer_for_results(
     peer_token: u32,
 ) -> Result<(TcpStream, ParsedSearchResponse)> {
     let addr = format!("{}:{}", ip, port);
+    tracing::debug!("[ConnectToPeer] START: '{}' at {} (token={})", peer_username, addr, peer_token);
 
     // Step 1: TCP connection
     let mut peer_stream = match tokio::time::timeout(
@@ -453,49 +484,60 @@ pub async fn connect_to_peer_for_results(
         TcpStream::connect(&addr)
     ).await {
         Ok(Ok(stream)) => {
-            tracing::debug!("[ConnectToPeer] Connected to '{}' at {}", peer_username, addr);
+            tracing::debug!("[ConnectToPeer] TCP connected to '{}' at {}", peer_username, addr);
             stream
         }
         Ok(Err(e)) => {
+            tracing::debug!("[ConnectToPeer] TCP connect FAILED to '{}': {}", peer_username, e);
             bail!("TCP connect to '{}' failed: {}", peer_username, e);
         }
         Err(_) => {
+            tracing::debug!("[ConnectToPeer] TCP connect TIMEOUT to '{}'", peer_username);
             bail!("TCP connect to '{}' timed out (peer unreachable)", peer_username);
         }
     };
 
+    // Disable Nagle's algorithm for immediate packet sending (matches Nicotine+)
+    peer_stream.set_nodelay(true)?;
+
     // Step 2: Send PierceFirewall
+    tracing::debug!("[ConnectToPeer] Sending PierceFirewall to '{}' (token={})", peer_username, peer_token);
     if let Err(e) = send_pierce_firewall(&mut peer_stream, peer_token).await {
+        tracing::debug!("[ConnectToPeer] PierceFirewall FAILED to '{}': {}", peer_username, e);
         bail!("Failed to send PierceFirewall to '{}': {}", peer_username, e);
     }
-    tracing::debug!("[ConnectToPeer] Sent PierceFirewall to '{}' (token={})", peer_username, peer_token);
+    tracing::debug!("[ConnectToPeer] PierceFirewall sent to '{}' (token={})", peer_username, peer_token);
 
-    // Step 3: Wait for response - could be PeerInit or FileSearchResponse directly
-    let first_u32 = match tokio::time::timeout(Duration::from_secs(5), peer_stream.read_u32_le()).await {
-        Ok(Ok(v)) => v,
+    // Step 3: Wait for FileSearchResponse
+    // Per Nicotine+ protocol: after PierceFirewall, peer sends FileSearchResponse directly
+    // (The peer already knows who we are from the token match)
+    tracing::debug!("[ConnectToPeer] Waiting for response from '{}'...", peer_username);
+    let msg_len = match tokio::time::timeout(Duration::from_secs(5), peer_stream.read_u32_le()).await {
+        Ok(Ok(v)) => {
+            tracing::debug!("[ConnectToPeer] Got first u32 from '{}': {} (0x{:08x})", peer_username, v, v);
+            v
+        }
         Ok(Err(e)) => {
+            tracing::debug!("[ConnectToPeer] Read error from '{}': {}", peer_username, e);
             bail!("'{}' handshake read error: {}", peer_username, e);
         }
         Err(_) => {
+            tracing::debug!("[ConnectToPeer] Timeout waiting for response from '{}'", peer_username);
             bail!("'{}' handshake timeout (connected but no response)", peer_username);
         }
     };
 
-    if first_u32 == 5 {
-        // PierceFirewall response
-        let _msg_type = peer_stream.read_u8().await?;
-        let _token = peer_stream.read_u32_le().await?;
-    } else if first_u32 > 5 && first_u32 < 200 {
-        // PeerInit response
-        let _msg_type = peer_stream.read_u8().await?;
-        let remaining = (first_u32 - 1) as usize;
-        let mut data = vec![0u8; remaining];
-        peer_stream.read_exact(&mut data).await?;
-    } else if first_u32 > 100 && first_u32 < 10_000_000 {
-        // FileSearchResponse directly
+    // Handle response based on message length
+    // FileSearchResponse: length > 100, code = 9, zlib compressed
+    // Note: Some peers may send unexpected responses (PeerInit, PierceFirewall)
+    // which we consume and retry
+    if msg_len > 100 && msg_len < 10_000_000 {
+        // Expected: FileSearchResponse
         let code = peer_stream.read_u32_le().await?;
+        tracing::debug!("[ConnectToPeer] '{}': msg_len={}, code={}", peer_username, msg_len, code);
         if code == 9 {
-            let data_len = (first_u32 - 4) as usize;
+            tracing::debug!("[ConnectToPeer] '{}': Got FileSearchResponse (code=9), reading {} bytes", peer_username, msg_len - 4);
+            let data_len = (msg_len - 4) as usize;
             let mut compressed = vec![0u8; data_len];
             peer_stream.read_exact(&mut compressed).await?;
 
@@ -505,19 +547,48 @@ pub async fn connect_to_peer_for_results(
             };
 
             let response = parse_file_search_response(&decompressed)?;
+            tracing::debug!("[ConnectToPeer] '{}': Parsed {} files from search response", peer_username, response.files.len());
             return Ok((peer_stream, response));
+        } else {
+            // Unknown code, skip this message and continue to wait
+            tracing::debug!("[ConnectToPeer] '{}': Unexpected code {} (not 9), skipping {} bytes", peer_username, code, msg_len - 4);
+            let remaining = (msg_len - 4) as usize;
+            let mut skip_data = vec![0u8; remaining];
+            peer_stream.read_exact(&mut skip_data).await?;
         }
+    } else if msg_len == 5 {
+        // Unexpected: PierceFirewall response (shouldn't happen per Nicotine+ protocol)
+        tracing::debug!("[ConnectToPeer] '{}': Unexpected PierceFirewall (len=5), consuming", peer_username);
+        let msg_type = peer_stream.read_u8().await?;
+        let token = peer_stream.read_u32_le().await?;
+        tracing::debug!("[ConnectToPeer] '{}': PierceFirewall type={}, token={}", peer_username, msg_type, token);
+    } else if msg_len > 5 && msg_len < 200 {
+        // Unexpected: PeerInit response (shouldn't happen per Nicotine+ protocol)
+        tracing::debug!("[ConnectToPeer] '{}': Unexpected PeerInit (len={}), consuming", peer_username, msg_len);
+        let msg_type = peer_stream.read_u8().await?;
+        let remaining = (msg_len - 1) as usize;
+        let mut data = vec![0u8; remaining];
+        peer_stream.read_exact(&mut data).await?;
+        tracing::debug!("[ConnectToPeer] '{}': PeerInit type={}, consumed {} bytes", peer_username, msg_type, remaining);
+    } else {
+        tracing::debug!("[ConnectToPeer] '{}': Unexpected message length {} (not PierceFirewall, PeerInit, or FileSearchResponse)", peer_username, msg_len);
     }
 
-    // Wait for FileSearchResponse
-    tracing::debug!("[ConnectToPeer] Waiting for FileSearchResponse from '{}'...", peer_username);
+    // Wait for FileSearchResponse (retry loop if first message wasn't it)
+    tracing::debug!("[ConnectToPeer] '{}': Entering retry loop for FileSearchResponse...", peer_username);
     for attempt in 0..10 {
+        tracing::debug!("[ConnectToPeer] '{}': Retry attempt {}/10", peer_username, attempt + 1);
         let msg_len = match tokio::time::timeout(Duration::from_secs(3), peer_stream.read_u32_le()).await {
-            Ok(Ok(len)) => len,
+            Ok(Ok(len)) => {
+                tracing::debug!("[ConnectToPeer] '{}': Retry got msg_len={}", peer_username, len);
+                len
+            }
             Ok(Err(e)) => {
+                tracing::debug!("[ConnectToPeer] '{}': Retry read error: {}", peer_username, e);
                 bail!("'{}' read error waiting for results: {}", peer_username, e);
             }
             Err(_) => {
+                tracing::debug!("[ConnectToPeer] '{}': Retry timeout (attempt {})", peer_username, attempt + 1);
                 if attempt == 9 {
                     bail!("'{}' results timeout (connected, handshook, but no search results after 30s)", peer_username);
                 }
@@ -526,6 +597,7 @@ pub async fn connect_to_peer_for_results(
         };
 
         if msg_len == 0 || msg_len > 10_000_000 {
+            tracing::debug!("[ConnectToPeer] '{}': Skipping invalid msg_len={}", peer_username, msg_len);
             continue;
         }
 
@@ -533,6 +605,7 @@ pub async fn connect_to_peer_for_results(
         let data_len = (msg_len - 4) as usize;
         let mut data = vec![0u8; data_len];
         peer_stream.read_exact(&mut data).await?;
+        tracing::debug!("[ConnectToPeer] '{}': Retry got code={}, data_len={}", peer_username, code, data_len);
 
         if code == 9 {
             let decompressed = match ZlibDecoder::new(&data[..]).bytes().collect::<Result<Vec<_>, _>>() {
@@ -541,13 +614,14 @@ pub async fn connect_to_peer_for_results(
             };
 
             let response = parse_file_search_response(&decompressed)?;
-            tracing::debug!("[ConnectToPeer] Got {} files from '{}'", response.files.len(), peer_username);
+            tracing::debug!("[ConnectToPeer] '{}': SUCCESS - Got {} files from retry loop", peer_username, response.files.len());
             return Ok((peer_stream, response));
         } else {
-            tracing::debug!("[ConnectToPeer] '{}' sent code {} (not search results), continuing...", peer_username, code);
+            tracing::debug!("[ConnectToPeer] '{}': Retry got code {} (not 9), continuing...", peer_username, code);
         }
     }
 
+    tracing::debug!("[ConnectToPeer] '{}': FAILED - No FileSearchResponse after 10 attempts", peer_username);
     bail!("'{}' sent no FileSearchResponse after 10 messages", peer_username)
 }
 
@@ -907,23 +981,31 @@ pub async fn wait_for_file_connection(
     file_conn_rx: &mut tokio::sync::mpsc::Receiver<FileConnection>,
     timeout_secs: u64,
 ) -> Result<FileConnection> {
-    tracing::info!("[DOWNLOAD] Waiting for F connection (token={})", transfer_token);
+    tracing::info!("[F-CONN] === WAITING FOR F CONNECTION ===");
+    tracing::info!("[F-CONN] Peer: '{}', Token: {}, Timeout: {}s", peer_username, transfer_token, timeout_secs);
 
     let file_conn = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
+        let mut loop_count = 0;
         loop {
+            loop_count += 1;
+            if loop_count % 10 == 0 {
+                tracing::debug!("[F-CONN] Still waiting... (loop iteration {})", loop_count);
+            }
             tokio::select! {
                 biased;
 
                 // Check for direct connection via our listener (PREFERRED)
                 conn = file_conn_rx.recv() => {
                     if let Some(conn) = conn {
-                        tracing::info!("[DOWNLOAD] Got F connection from channel with token {}", conn.transfer_token);
+                        tracing::info!("[F-CONN] Got F connection from channel with token {} (expected {})", conn.transfer_token, transfer_token);
                         if conn.transfer_token == transfer_token {
-                            tracing::info!("[DOWNLOAD] Token matches!");
+                            tracing::info!("[F-CONN] Token MATCHES! Returning connection.");
                             return Ok::<FileConnection, anyhow::Error>(conn);
                         } else {
-                            tracing::debug!("[DOWNLOAD] Token mismatch: expected {}, got {}", transfer_token, conn.transfer_token);
+                            tracing::debug!("[F-CONN] Token MISMATCH: expected {}, got {} - ignoring", transfer_token, conn.transfer_token);
                         }
+                    } else {
+                        tracing::debug!("[F-CONN] file_conn_rx.recv() returned None");
                     }
                 }
 
@@ -939,26 +1021,31 @@ pub async fn wait_for_file_connection(
                             let port = buf.get_u32_le();
                             let indirect_token = buf.get_u32_le();
 
+                            tracing::debug!("[F-CONN] Got ConnectToPeer: user='{}', type='{}', addr={}:{}, token={}",
+                                username, conn_type, ip, port, indirect_token);
+
                             if conn_type == "F" && username == peer_username {
-                                tracing::info!("[DOWNLOAD] Got ConnectToPeer F from server - connecting immediately to {}:{}", ip, port);
+                                tracing::info!("[F-CONN] ConnectToPeer F matches peer '{}' - connecting to {}:{}", peer_username, ip, port);
                                 // Try indirect connection IMMEDIATELY, not after timeout
                                 match connect_for_indirect_transfer(&ip, port, indirect_token, our_username).await {
                                     Ok(conn) => {
-                                        tracing::info!("[DOWNLOAD] Indirect connection successful!");
+                                        tracing::info!("[F-CONN] Indirect connection SUCCESS! Returning connection.");
                                         return Ok(conn);
                                     }
                                     Err(e) => {
-                                        tracing::warn!("[DOWNLOAD] Indirect connection failed: {} - continuing to wait for direct", e);
+                                        tracing::warn!("[F-CONN] Indirect connection FAILED: {} - continuing to wait", e);
                                         // Continue waiting for direct connection as fallback
                                     }
                                 }
+                            } else if conn_type == "F" {
+                                tracing::debug!("[F-CONN] ConnectToPeer F for different user '{}' (expected '{}')", username, peer_username);
                             }
                         }
                         Ok((code, _)) => {
-                            tracing::trace!("[DOWNLOAD] Ignoring server message code {}", code);
+                            tracing::trace!("[F-CONN] Ignoring server message code {}", code);
                         }
                         Err(e) => {
-                            tracing::warn!("[DOWNLOAD] Server read error: {}", e);
+                            tracing::warn!("[F-CONN] Server read error: {}", e);
                         }
                     }
                 }
@@ -967,9 +1054,18 @@ pub async fn wait_for_file_connection(
     }).await;
 
     match file_conn {
-        Ok(Ok(conn)) => Ok(conn),
-        Ok(Err(e)) => bail!("F connection error: {}", e),
-        Err(_) => bail!("Timeout waiting for file connection"),
+        Ok(Ok(conn)) => {
+            tracing::info!("[F-CONN] === F CONNECTION ESTABLISHED === token={}", conn.transfer_token);
+            Ok(conn)
+        }
+        Ok(Err(e)) => {
+            tracing::error!("[F-CONN] === F CONNECTION ERROR === {}", e);
+            bail!("F connection error: {}", e)
+        }
+        Err(_) => {
+            tracing::error!("[F-CONN] === F CONNECTION TIMEOUT === ({}s elapsed)", timeout_secs);
+            bail!("Timeout waiting for file connection")
+        }
     }
 }
 

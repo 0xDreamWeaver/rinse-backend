@@ -30,6 +30,9 @@ impl ServerConnection {
             .await
             .context("Failed to connect to Soulseek server")?;
 
+        // Disable Nagle's algorithm for immediate packet sending (matches Nicotine+)
+        stream.set_nodelay(true)?;
+
         // Split into separate read/write halves to avoid deadlock
         let (read_half, write_half) = stream.into_split();
         let reader = FramedRead::new(read_half, ServerCodec);
@@ -159,6 +162,9 @@ impl PeerConnection {
             .await
             .context("Failed to connect to peer")?;
 
+        // Disable Nagle's algorithm for immediate packet sending (matches Nicotine+)
+        stream.set_nodelay(true)?;
+
         let framed = Framed::new(stream, PeerCodec);
 
         Ok(Self { stream: framed, username })
@@ -226,6 +232,9 @@ impl FileTransferConnection {
         let stream = TcpStream::connect(&addr)
             .await
             .context("Failed to connect for file transfer")?;
+
+        // Disable Nagle's algorithm for immediate packet sending (matches Nicotine+)
+        stream.set_nodelay(true)?;
 
         Ok(Self { stream })
     }

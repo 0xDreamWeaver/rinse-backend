@@ -2,9 +2,373 @@
 
 ---
 
-## Session Update - January 31, 2026 (Latest)
+## Session Update - February 3, 2026 (Latest)
+
+### Protocol Implementation Fixes - Phase 1 & 2 Complete
+
+Implemented four critical protocol fixes identified from Nicotine+ comparison. **Benchmarked before and after with measurable improvements.**
+
+**Benchmark Results (Search: "Holdin' On Skrillex & Nero Remix"):**
+
+| Metric | Before | After | Improvement |
+|--------|--------|-------|-------------|
+| Peer success rate | 1.4-3.9% | 6.9% | **2-5x improvement** |
+| Handshake EOF errors | ~31 | ~10 | **3x reduction** |
+| Download success | Failed (30s timeout) | Succeeded first try | - |
+
+**Completed Fixes:**
+
+1. **✅ TCP_NODELAY on all connections** (`peer.rs`, `client.rs`, `connection.rs`)
+   - Added `stream.set_nodelay(true)?` to all 10 connection points
+   - Disables Nagle's algorithm - handshake messages (5-50 bytes) now sent immediately
+   - This was the highest-impact fix
+
+2. **✅ PeerInit token always 0** (`peer.rs`)
+   - Changed `send_peer_init()` to always send token=0
+   - Protocol spec: "The token is always zero and ignored today"
+   - We were incorrectly sending the actual token value
+
+3. **✅ CantConnectToPeer feedback** (`peer.rs`, `client.rs`)
+   - Added `send_cant_connect_to_peer()` helper function (message code 1001)
+   - Added failure channel in search loop to collect failed connection attempts
+   - After search completion, drains failures and notifies server
+   - Good network citizenship - server can attempt alternative routing
+
+4. **✅ Post-PierceFireWall response handling** (`peer.rs`)
+   - Clarified expected flow with comments and debug logging
+   - After PierceFireWall, we should expect FileSearchResponse directly (not PeerInit)
+   - Kept backward-compatible handling for robustness
+
+**Key Code Additions:**
+
+```rust
+// peer.rs - CantConnectToPeer helper (lines ~90-115)
+pub async fn send_cant_connect_to_peer(
+    server_stream: &mut TcpStream,
+    token: u32,
+    username: &str,
+) -> std::io::Result<()>
+
+// client.rs - Failure channel in search loop (line ~557)
+let (failure_tx, mut failure_rx) = mpsc::channel::<(u32, String)>(100);
+
+// client.rs - After search, send CantConnectToPeer messages (lines ~703-720)
+while let Ok(Some((token, username))) = tokio::time::timeout(...).await {
+    super::peer::send_cant_connect_to_peer(&mut self.server_stream, token, &username).await?;
+}
+```
+
+---
+
+### Next Phase: Diagnostic Analysis Required
+
+The following issues remain and need investigation before further protocol work:
+
+**Issue 1: Zero Incoming Connections (HIGH PRIORITY)**
+```
+[SoulseekClient] Incoming connections: 0
+```
+Despite UPnP claiming success for ports 2234/2235, no peers connect to our listener.
+
+**Possible causes to investigate:**
+- UPnP mapping not actually working (router may not honor it)
+- Double NAT / CGNAT at ISP level
+- macOS firewall blocking incoming
+- Listener accept loop bug
+
+**Diagnostic steps:**
+1. Test port accessibility from external network (`nc -vz <external-ip> 2234`)
+2. Check local listener works (`nc -vz 127.0.0.1 2234`)
+3. Verify UPnP mappings on router admin page
+4. Check macOS firewall settings
+
+**Issue 2: Orphaned Popups for List Searches (MEDIUM PRIORITY)**
+List queue searches (`queueList`) don't pass per-item `client_id`, causing popup tracking to fail. Items use query fallback matching which can mismatch.
+
+**Files needing update:**
+- `backend/src/api/queue.rs` - Accept client_ids array
+- `backend/src/services/queue.rs` - Pass to enqueue
+- `frontend/src/lib/api.ts` - Generate per-item client_ids
+- `frontend/src/pages/Search.tsx` - Update list mutation
+
+---
+
+### Diagnostic Logging Session (Feb 3, 2026 - Afternoon)
+
+After implementing protocol fixes, user reported downloads failing in some cases. Added comprehensive diagnostic logging to trace the issue:
+
+**Files Modified:**
+- `src/protocol/peer.rs` - Added `[ConnectToPeer]` and `[F-CONN]` logging
+- `src/protocol/client.rs` - Added `[Download]` step logging and `[Search]` connection storage logging
+
+**Status:** Logging added, code compiles, awaiting test run to identify failure point.
+
+**See "CRITICAL REGRESSION" section below for full diagnostic guide.**
+
+---
+
+### Previous: Protocol Analysis Session
+
+Conducted deep analysis comparing our Soulseek protocol implementation with Nicotine+ reference client. Identified major differences causing low peer success rates (21% in sample search).
+
+**Key Documents Created:**
+- `docs/PROTOCOL_IMPL.md` - Comprehensive implementation guide with TODO list
+- `docs/nicotine-comparison.md` - Detailed technical comparison
+
+**Original Findings (before fixes):**
+
+1. ~~**TCP_NODELAY not set**~~ → ✅ FIXED
+2. ~~**No CantConnectToPeer feedback**~~ → ✅ FIXED
+3. ~~**PeerInit token should be 0**~~ → ✅ FIXED
+4. ~~**Post-PierceFireWall handling**~~ → ✅ FIXED
+5. **Zero incoming connections** → 🔍 NEEDS DIAGNOSIS
+6. **Peer blacklisting after failed downloads** → 📋 Future investigation
+
+**Added Handler Timing Logging:**
+- `src/protocol/client.rs` - Added `ACTIVE_HANDLERS` counter and timing for handshake/recv phases
+- Logs show handshake duration, receive duration, and total task time
+
+---
+
+## Session Update - February 1, 2026
 
 ### Completed This Session
+
+#### 1. Client ID for Search Popup Tracking (MOSTLY DONE)
+Implemented client-generated IDs to link frontend popups with backend WebSocket events:
+
+**Backend Changes:**
+- Created migration `007_add_client_id.sql` - adds `client_id` column to `search_queue` table
+- Updated `models/mod.rs` - added `client_id: Option<String>` to relevant structs
+- Updated `db/mod.rs` - `enqueue_search` now accepts and stores `client_id`
+- Updated `api/queue.rs` - endpoint passes `client_id` through
+- Updated `api/ws.rs` - all `WsEvent` variants now have `client_id` with `skip_serializing_if`
+- Updated `services/queue.rs` - includes `client_id` in all WebSocket broadcasts
+
+**Frontend Changes:**
+- Updated `types/index.ts` - added `client_id` to all WebSocket event types
+- Updated `lib/api.ts` - `queueSearch` generates `client_id` if not provided
+- Updated `store/index.ts` - `addPendingSearch(query, clientId)`, matching by `client_id` first
+- Updated `pages/Search.tsx` - generates clientId and passes to both store and API
+- Fixed `search_started` handler to not overwrite advanced stages (`duplicate`, `completed`, etc.)
+
+**Remaining Issue:** List searches (`queueList`) don't pass per-item `client_id` - they fall back to query matching. Need to update list API to support this.
+
+#### 2. Move Play Button to Track Name Column (DONE)
+- Updated `Items.tsx` and `ListDetail.tsx` to inline play button with filename
+- Uses flex layout with gap-3 for spacing
+
+#### 3. Remove Legacy Download Code (DONE)
+- Removed ~630 lines of `_legacy_*` functions from `services/download.rs`
+- `DownloadService` is now a clean CRUD/connection manager
+- Removed unused `ws_broadcast` parameter
+
+#### 4. WebSocket Initial Load Optimization (DONE)
+- Changed `api/ws.rs` to only send `item_updated` for active items (pending/downloading/queued)
+- Previously sent ALL items including completed ones (50+ unnecessary events)
+
+#### 5. Peer Connection LRU Cache (DONE)
+- Added `lru` crate to dependencies
+- Changed `peer_streams` from `HashMap` to `LruCache` with max 100 connections
+- Removed storage of connections from peers with no results
+- This prevents long-term FD accumulation
+
+### Discovered Issue: File Descriptor Exhaustion (NEEDS WORK)
+
+**Problem:** "Too many open files" errors occur immediately during search, even with LRU cache fix.
+
+**Root Cause:** Burst of concurrent connections during search exceeds FD limit (default 256 on macOS):
+- When you search, 200+ peers may connect simultaneously
+- Each `accept()` creates a file descriptor
+- Spawned handler tasks hold FDs until complete
+- Rate of incoming connections exceeds rate of task completion
+
+**Analysis Document:** See `docs/fd-exhaustion-analysis.md` for full details.
+
+**Potential Solutions:**
+1. Increase ulimit: `ulimit -n 4096` (immediate workaround)
+2. Semaphore to limit concurrent handlers
+3. Connection timeout for slow peers
+4. Bounded worker pool instead of unbounded spawning
+
+### Key Files Modified This Session
+
+**Backend:**
+- `src/api/ws.rs` - Only send active items on connect, added client_id to events
+- `src/api/queue.rs` - Accept and pass client_id
+- `src/services/queue.rs` - Include client_id in WebSocket broadcasts
+- `src/services/download.rs` - Removed legacy code, simplified to CRUD only
+- `src/protocol/client.rs` - LRU cache for peer_streams, removed no-result connection storage
+- `src/db/mod.rs` - Store client_id in enqueue_search
+- `src/models/mod.rs` - Added client_id to request/response structs
+- `migrations/007_add_client_id.sql` - New migration
+- `Cargo.toml` - Added lru crate
+
+**Frontend:**
+- `src/store/index.ts` - Client ID generation, matching logic, stage protection
+- `src/lib/api.ts` - Generate and pass client_id
+- `src/pages/Search.tsx` - Use generateClientId
+- `src/pages/Items.tsx` - Inline play button, fixed activeDownloads lookup
+- `src/pages/ListDetail.tsx` - Inline play button
+- `src/pages/ItemDetail.tsx` - Added missing status colors
+
+---
+
+## NEXT TASKS TO WORK ON
+
+### 1. Protocol Diagnostics (NEXT PHASE)
+
+**See `docs/PROTOCOL_IMPL.md` for full implementation guide and status.**
+
+Protocol Phase 1 & 2 fixes are complete with measurable improvements (peer success rate: 1.4% → 6.9%). Next phase requires diagnostic investigation.
+
+#### ✅ Completed (Feb 3, 2026)
+- [x] **Add TCP_NODELAY** to all connections - Success rate improved 2-5x
+- [x] **Change PeerInit token to 0** - Now matches protocol spec
+- [x] **Implement CantConnectToPeer** - Server feedback on failures
+- [x] **Simplify post-PierceFireWall** - Better response handling with logging
+
+#### 🚨 CRITICAL REGRESSION - Diagnose First
+- [ ] **Downloads failing after PierceFireWall changes** - Since implementing fix #4 (Post-PierceFireWall handling), track downloads are no longer functioning in some cases
+
+**Background:**
+On Feb 3, 2026, we implemented protocol fixes to improve peer connection rates. Fix #4 modified `connect_to_peer_for_results()` in `peer.rs` to clarify post-PierceFireWall response handling. After this change, some downloads stopped working.
+
+**Diagnostic Logging Added (Feb 3, 2026):**
+Comprehensive logging was added to trace the complete flow:
+
+| Log Prefix | Location | What It Traces |
+|------------|----------|----------------|
+| `[ConnectToPeer]` | `peer.rs` | Search result retrieval from peers |
+| `[Download]` | `client.rs` | Download initiation steps 1-6 |
+| `[F-CONN]` | `peer.rs` | F connection waiting/establishment |
+| `[Search]` | `client.rs` | Peer connection caching |
+
+**How to Diagnose:**
+1. Run backend with debug logging: `RUST_LOG=debug cargo run`
+2. Perform a search and attempt download
+3. Look for which step fails in the logs
+
+**Expected Successful Flow:**
+```
+[Search] Storing P connection for 'username' (has N files)
+[SoulseekClient] Cached peer connections: N
+[Download] === INITIATE DOWNLOAD START ===
+[Download] Step 1: Getting P connection for 'username'
+[Download] Using stored P connection from search for 'username'
+[Download] Step 2: Sending QueueUpload
+[Download] Step 3: Waiting for peer's TransferRequest
+[Download] Step 4: Transfer ALLOWED
+[Download] Step 5: Waiting for F connection
+[F-CONN] === WAITING FOR F CONNECTION ===
+[F-CONN] Token MATCHES! Returning connection.
+[Download] Step 6: F connection established
+[Transfer] === DOWNLOAD COMPLETE ===
+```
+
+**Potential Failure Points & Fixes:**
+
+1. **No stored P connection** (Step 1 shows "No stored P connection")
+   - Cause: `connect_to_peer_for_results()` failing during search
+   - Look for: `[ConnectToPeer]` errors during search phase
+   - Likely issue: Response parsing changed, peer sends unexpected format
+   - Fix: Adjust response handling in `connect_to_peer_for_results()`
+
+2. **QueueUpload fails** (Step 2 shows error)
+   - Cause: P connection was stored but is now stale/closed
+   - Fix: Add connection health check or reconnection logic
+
+3. **TransferRequest timeout** (Step 3 times out after 60s)
+   - Cause: Peer not responding to QueueUpload
+   - Check: Is peer online? Are we sending correct message format?
+
+4. **F connection timeout** (Step 5 times out after 30s)
+   - Cause: Neither direct nor indirect F connection established
+   - Check `[F-CONN]` logs for ConnectToPeer F messages
+   - Possible: Our listener not working (zero incoming connections issue)
+
+5. **Token mismatch** (`[F-CONN] Token MISMATCH`)
+   - Cause: Wrong F connection received
+   - Fix: Check token handling in negotiation
+
+**Key Code Locations:**
+- `peer.rs:471-601` - `connect_to_peer_for_results()` - Search result retrieval
+- `peer.rs:951-1023` - `wait_for_file_connection()` - F connection waiting
+- `client.rs:1003-1247` - `initiate_download()` - Full download flow
+- `client.rs:539-731` - `search()` - Peer connection storage
+
+**After Identifying the Issue:**
+Once logs reveal the failure point, the fix will likely be in one of:
+- Response parsing in `connect_to_peer_for_results()`
+- Connection storage/retrieval logic
+- Token handling between negotiation and F connection
+
+**Quick Reference - What Changed in Fix #4:**
+The changes to `connect_to_peer_for_results()` (lines 471-601 in peer.rs) modified how we handle responses after sending PierceFireWall:
+- Added more specific logging for message types
+- Changed some `tracing::debug!` to include more detail
+- Added retry loop logging
+- The core protocol logic was NOT changed, only logging/comments
+
+If the issue is in search result retrieval, revert or simplify the response handling.
+If the issue is in download flow, check if peer_streams are being populated correctly.
+
+#### 🔍 Needs Diagnosis
+- [ ] **Zero incoming connections** - UPnP claims success but no peers connect to listener
+  - Test: External port check, local listener test, UPnP verification, macOS firewall
+  - May indicate CGNAT, UPnP not working, or listener bug
+
+- [ ] **List search popup tracking** - `queueList` doesn't pass per-item client_id
+  - Files: `api/queue.rs`, `services/queue.rs`, `frontend/lib/api.ts`
+
+#### 📋 Future Investigation
+- [ ] **Peer blacklisting after failed downloads** - Peers that worked reject us after timeout
+- [ ] **F connection establishment issues** - Some indirect F connections fail
+- [ ] **Connection rate limiting** - May be connecting too aggressively
+
+**Benchmark Process Established:**
+1. Breakdown and analyze task
+2. Benchmark existing functionality
+3. Implement solution
+4. Benchmark results
+5. If successful, proceed
+6. Update relevant documents
+
+### 2. Fix File Descriptor Exhaustion (HIGH PRIORITY)
+**Problem:** "Too many open files" errors during search bursts.
+
+**Solution Options:**
+- Add semaphore to limit concurrent connection handlers
+- Add timeout to drop slow/hung connections
+- See `docs/fd-exhaustion-analysis.md` for full analysis
+
+**Files to modify:**
+- `src/protocol/client.rs` - Add semaphore/timeout to listener loop
+
+### 3. Add client_id to List Searches (MEDIUM PRIORITY)
+**Problem:** List queue searches don't have per-item `client_id`, causing popup orphaning.
+
+**Current:** `queueList` API doesn't support per-query client_ids
+**Solution:** Either update backend list API to accept client_ids per query, or use a different tracking approach for lists.
+
+**Files to modify:**
+- `backend/src/api/queue.rs` - Accept client_ids array in list request
+- `backend/src/services/queue.rs` - Pass client_ids to enqueue_searches_for_list
+- `frontend/src/lib/api.ts` - Generate and pass client_ids for list searches
+- `frontend/src/pages/Search.tsx` - Update list mutation
+
+### 4. Delete from List Should Remove from List
+**Current behavior**: "Delete" on a track in a list only soft-deletes the item; it stays in the list with "Deleted" status
+**Desired behavior**: "Delete" on a track in a list should ALSO remove it from the list
+
+**Files to modify:**
+- `frontend/src/pages/ListDetail.tsx` - Delete action should call both delete and remove
+
+---
+
+## Session Update - January 31, 2026
+
+### Completed That Session
 
 #### 1. Audio Player with Waveform Visualization (DONE)
 Added a persistent bottom-bar audio player using wavesurfer.js:
@@ -28,61 +392,6 @@ Added a persistent bottom-bar audio player using wavesurfer.js:
 #### 5. Soft Delete for Items (DONE)
 - Items now have soft delete with `deleted_at` timestamp
 - Lists show "Deleted" status for items deleted from outside the list
-
-### Key Files Modified This Session
-
-**Backend:**
-- `src/api/items.rs` - HTTP Range Request support for streaming
-- `src/api/lists.rs` - Remove item from list endpoints
-- `src/protocol/client.rs` - Early abort for no results
-- `src/services/queue.rs` - Skip retry for no results
-- `src/db/mod.rs` - List item removal with total_items update
-
-**Frontend:**
-- `src/components/AudioPlayer.tsx` - New wavesurfer.js audio player
-- `src/components/Layout.tsx` - Integrated AudioPlayer
-- `src/store/index.ts` - Audio player state, list item selection
-- `src/pages/Items.tsx` - Play button, retry button columns
-- `src/pages/ListDetail.tsx` - Play button, selection/actions
-- `src/pages/ItemDetail.tsx` - Large play button
-
----
-
-## NEXT TASKS TO WORK ON
-
-### 1. Refactor Search Popup Tracking (HIGH PRIORITY)
-**Problem**: Search popups become disconnected from their relevant search context, leaving components floating and miscommunicating search status.
-
-**Solution**: Create client-generated IDs that link frontend to backend:
-- When client creates a new search, generate a local tracking ID
-- Pass this ID to the backend with the search request
-- Backend associates client ID with its internal search ID
-- All WebSocket events include this client ID for matching
-- This creates an unbreakable link preventing orphaned popups
-
-**Files to modify:**
-- `frontend/src/store/index.ts` - Generate and track client IDs
-- `frontend/src/lib/api.ts` - Pass client ID in queue requests
-- `backend/src/api/queue.rs` - Accept and store client ID
-- `backend/src/services/queue.rs` - Include client ID in WebSocket events
-- `backend/src/db/mod.rs` - Store client ID in search_queue table
-
-### 2. Move Play Button to Track Name Column
-**Current**: Play button is in its own separate column
-**Desired**: Play button should be inline with track name, sitting right in front of the filename
-
-**Files to modify:**
-- `frontend/src/pages/Items.tsx` - Combine play button into filename column
-- `frontend/src/pages/ListDetail.tsx` - Same change
-
-### 3. Delete from List Should Remove from List
-**Current behavior**: "Delete" on a track in a list only soft-deletes the item; it stays in the list with "Deleted" status
-**Desired behavior**: "Delete" on a track in a list should ALSO remove it from the list
-- The "Deleted" status should only appear for tracks deleted from OUTSIDE the list (e.g., from Items page)
-
-**Files to modify:**
-- `frontend/src/pages/ListDetail.tsx` - Delete action should call both delete and remove
-- Potentially `backend/src/api/items.rs` - Consider if backend should handle this
 
 ---
 
@@ -128,6 +437,7 @@ backend/
 │   ├── protocol/
 │   │   ├── client.rs        # SoulseekClient - search, download orchestration
 │   │   │                    # Key methods: search(), download_file(), initiate_download()
+│   │   │                    # Uses LRU cache for peer_streams (max 100 connections)
 │   │   ├── peer.rs          # Peer protocol - P/F connections, file transfer
 │   │   │                    # Key functions: wait_for_file_connection(), receive_file_data()
 │   │   ├── messages.rs      # Protocol message types and encoding
@@ -137,17 +447,19 @@ backend/
 │   │   ├── codec.rs         # Message framing
 │   │   └── obfuscation.rs   # Soulseek obfuscation support
 │   ├── services/
-│   │   ├── download.rs      # DownloadService - blocking download path (legacy)
-│   │   ├── queue.rs         # QueueService - non-blocking queue system (NEW)
+│   │   ├── download.rs      # DownloadService - CRUD operations + Soulseek connection
+│   │   │                    # (Legacy search code removed - now uses QueueService)
+│   │   ├── queue.rs         # QueueService - non-blocking queue system
 │   │   │                    # Manages search queue, spawned transfers, completion handling
 │   │   ├── fuzzy.rs         # Fuzzy matching for duplicate detection
 │   │   └── upnp.rs          # UPnP port forwarding (ports 2234, 2235)
 │   ├── api/
-│   │   ├── items.rs         # Item endpoints - has legacy blocking search (to be removed)
+│   │   ├── items.rs         # Item endpoints (CRUD, download with Range support)
 │   │   ├── lists.rs         # List management endpoints
-│   │   ├── queue.rs         # Queue API endpoints (NEW)
+│   │   ├── queue.rs         # Queue API endpoints
 │   │   │                    # POST /api/queue/search, POST /api/queue/list, etc.
 │   │   ├── ws.rs            # WebSocket events + broadcast channel
+│   │   │                    # Events include client_id for popup tracking
 │   │   └── auth.rs          # JWT authentication
 │   ├── db/
 │   │   └── mod.rs           # Database operations (SQLite via sqlx)
@@ -155,8 +467,11 @@ backend/
 │       └── mod.rs           # Data models (Item, List, User, QueuedSearch, etc.)
 ├── storage/                 # Downloaded files stored here
 ├── data/                    # SQLite database (rinse.db)
-└── migrations/              # Database schema
-    └── 005_create_search_queue.sql  # Queue tables (NEW)
+├── docs/
+│   └── fd-exhaustion-analysis.md  # Analysis of file descriptor issue
+└── migrations/
+    ├── 005_create_search_queue.sql  # Queue tables
+    └── 007_add_client_id.sql        # Client ID for popup tracking
 ```
 
 ---

@@ -5,5 +5,3 @@
 fn get_track_metadata(file_path: &str) -> Result<TrackMetadata, Error> {
 
 }
-
-fn 

@@ -51,6 +51,7 @@ uuid = { version = "1.6", features = ["v4", "serde"] }
 rand = "0.8"
 fuzzy-matcher = "0.3"
 dotenvy = "0.15"
+lru = "0.12"
 
 # File streaming
 async-stream = "0.3"
