@@ -40,7 +40,7 @@ pub async fn init_upnp() -> Result<bool> {
             gw
         }
         Err(e) => {
-            tracing::info!("[UPnP] UPnP not available: {}. Manual port forwarding may be required.", e);
+            tracing::warn!("[UPnP] UPnP not available: {}. Manual port forwarding may be required.", e);
             return Ok(false);
         }
     };

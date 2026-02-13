@@ -34,6 +34,7 @@ use crate::models::{QueuedSearch, List, Item, QueueStatus, QueueStatusResponse};
 use crate::protocol::{SoulseekClient, DownloadInitResult, ArcProgressCallback};
 use crate::api::WsEvent;
 use crate::services::FuzzyMatcher;
+use crate::services::MetadataService;
 
 /// Extract the basename from a Soulseek path.
 /// Soulseek paths use Windows-style backslashes, so we need to handle both \ and /
@@ -86,6 +87,8 @@ pub struct QueueService {
     /// Channel for receiving transfer completion notifications
     transfer_completion_tx: mpsc::Sender<TransferCompletion>,
     transfer_completion_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<TransferCompletion>>>,
+    /// Metadata service for enriching downloaded tracks
+    metadata_service: Arc<MetadataService>,
 }
 
 impl QueueService {
@@ -95,6 +98,7 @@ impl QueueService {
         slsk_client: Arc<RwLock<Option<SoulseekClient>>>,
         ws_broadcast: broadcast::Sender<WsEvent>,
         config: QueueConfig,
+        metadata_service: Arc<MetadataService>,
     ) -> Self {
         let (tx, rx) = mpsc::channel::<TransferCompletion>(100);
 
@@ -105,6 +109,7 @@ impl QueueService {
             config,
             transfer_completion_tx: tx,
             transfer_completion_rx: Arc::new(tokio::sync::Mutex::new(rx)),
+            metadata_service,
         }
     }
 
@@ -125,10 +130,17 @@ impl QueueService {
     /// Enqueue a single search
     ///
     /// Returns the queued search entry and its position in the queue
+    ///
+    /// # Arguments
+    /// * `query` - Combined search query for Soulseek
+    /// * `artist` - Original artist from user input (optional)
+    /// * `track` - Original track name from user input (optional)
     pub async fn enqueue_search(
         &self,
         user_id: i64,
         query: &str,
+        artist: Option<&str>,
+        track: Option<&str>,
         format: Option<&str>,
         client_id: Option<&str>,
     ) -> Result<(QueuedSearch, i64)> {
@@ -144,12 +156,12 @@ impl QueueService {
         }
 
         // Enqueue the search
-        let queued = self.db.enqueue_search(user_id, query, format, None, None, client_id).await?;
+        let queued = self.db.enqueue_search(user_id, query, artist, track, format, None, None, client_id).await?;
         let position = self.db.get_queue_position(queued.id).await?;
 
         tracing::info!(
-            "[QueueService] Enqueued search: id={}, query='{}', position={}, client_id={:?}",
-            queued.id, query, position, client_id
+            "[QueueService] Enqueued search: id={}, artist={:?}, track={:?}, query='{}', position={}, client_id={:?}",
+            queued.id, artist, track, query, position, client_id
         );
 
         // Broadcast queue event
@@ -166,11 +178,14 @@ impl QueueService {
     /// Enqueue a list of searches
     ///
     /// Creates a list and enqueues all searches for it
+    ///
+    /// # Arguments
+    /// * `tracks` - Vec of (query, artist, track) tuples
     pub async fn enqueue_list(
         &self,
         user_id: i64,
         name: Option<String>,
-        queries: Vec<String>,
+        tracks: Vec<(String, Option<String>, Option<String>)>,
         format: Option<String>,
     ) -> Result<(List, Vec<QueuedSearch>)> {
         let list_name = name.unwrap_or_else(|| {
@@ -178,17 +193,17 @@ impl QueueService {
         });
 
         // Create the list
-        let list = self.db.create_list(&list_name, user_id, queries.len() as i32).await?;
+        let list = self.db.create_list(&list_name, user_id, tracks.len() as i32).await?;
 
         tracing::info!(
             "[QueueService] Created list: id={}, name='{}', items={}",
-            list.id, list_name, queries.len()
+            list.id, list_name, tracks.len()
         );
 
         // Enqueue all searches
         let queued_searches = self.db.enqueue_searches_for_list(
             user_id,
-            &queries,
+            &tracks,
             format.as_deref(),
             list.id,
         ).await?;
@@ -202,7 +217,7 @@ impl QueueService {
         self.broadcast(WsEvent::ListCreated {
             list_id: list.id,
             name: list_name.clone(),
-            total_items: queries.len() as i32,
+            total_items: tracks.len() as i32,
         });
 
         Ok((list, queued_searches))
@@ -534,6 +549,8 @@ impl QueueService {
         let list_id = queued.list_id;
         let list_position = queued.list_position;
         let client_id = queued.client_id.clone();
+        let original_artist = queued.original_artist.clone();
+        let original_track = queued.original_track.clone();
 
         tracing::info!(
             "[QueueWorker] Executing search for: '{}' (format: {:?}, client_id: {:?})",
@@ -662,6 +679,8 @@ impl QueueService {
         let mut item = self.db.create_item(
             &local_filename,
             query,
+            original_artist.as_deref(),
+            original_track.as_deref(),
             file_path.to_str().unwrap(),
             scored_file.size as i64,
             scored_file.bitrate.map(|b| b as i32),
@@ -898,9 +917,62 @@ impl QueueService {
                     });
                     self.broadcast(WsEvent::ItemUpdated {
                         item_id,
-                        filename: item.filename,
+                        filename: item.filename.clone(),
                         status: "completed".to_string(),
                         progress: 1.0,
+                    });
+
+                    // Spawn metadata lookup as background task (non-blocking)
+                    let metadata_service: Arc<crate::services::MetadataService> = Arc::clone(&self.metadata_service);
+                    let file_path = item.file_path.clone();
+                    let original_query = item.original_query.clone();
+                    let original_artist = item.original_artist.clone();
+                    let original_track = item.original_track.clone();
+                    let ws_broadcast = self.ws_broadcast.clone();
+
+                    tokio::spawn(async move {
+                        tracing::info!(
+                            "[MetadataService] Starting metadata lookup for item_id={}",
+                            item_id
+                        );
+                        let _ = ws_broadcast.send(WsEvent::MetadataLookupStarted { item_id });
+
+                        match metadata_service
+                            .lookup_and_store(
+                                item_id,
+                                &file_path,
+                                &original_query,
+                                original_artist.as_deref(),
+                                original_track.as_deref(),
+                            )
+                            .await
+                        {
+                            Ok(metadata) => {
+                                tracing::info!(
+                                    "[MetadataService] Metadata lookup complete for item_id={}: artist={:?}, bpm={:?}",
+                                    item_id,
+                                    metadata.artist,
+                                    metadata.bpm
+                                );
+                                let _ = ws_broadcast.send(WsEvent::MetadataUpdated {
+                                    item_id,
+                                    metadata: Some(metadata),
+                                    error: None,
+                                });
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "[MetadataService] Metadata lookup failed for item_id={}: {}",
+                                    item_id,
+                                    e
+                                );
+                                let _ = ws_broadcast.send(WsEvent::MetadataUpdated {
+                                    item_id,
+                                    metadata: None,
+                                    error: Some(e.to_string()),
+                                });
+                            }
+                        }
                     });
                 }
 

@@ -140,6 +140,29 @@ pub enum WsEvent {
         processing: i64,
         active_downloads: i64,
     },
+
+    // ========================================================================
+    // Metadata-related events
+    // ========================================================================
+
+    /// Metadata lookup has started for an item
+    MetadataLookupStarted {
+        item_id: i64,
+    },
+    /// Metadata has been updated for an item
+    MetadataUpdated {
+        item_id: i64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metadata: Option<crate::models::TrackMetadata>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// Progress update for library-wide metadata scan job
+    MetadataJobProgress {
+        total: i64,
+        completed: i64,
+        failed: i64,
+    },
 }
 
 /// Query params for WebSocket connection

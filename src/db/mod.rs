@@ -205,6 +205,8 @@ impl Database {
         &self,
         filename: &str,
         original_query: &str,
+        original_artist: Option<&str>,
+        original_track: Option<&str>,
         file_path: &str,
         file_size: i64,
         bitrate: Option<i32>,
@@ -214,13 +216,15 @@ impl Database {
     ) -> Result<Item> {
         let item = sqlx::query_as::<_, Item>(
             r#"
-            INSERT INTO items (filename, original_query, file_path, file_size, bitrate, duration, extension, source_username)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO items (filename, original_query, original_artist, original_track, file_path, file_size, bitrate, duration, extension, source_username)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING *
             "#
         )
         .bind(filename)
         .bind(original_query)
+        .bind(original_artist)
+        .bind(original_track)
         .bind(file_path)
         .bind(file_size)
         .bind(bitrate)
@@ -571,7 +575,19 @@ impl Database {
         Ok(())
     }
 
-    /// Delete list
+    /// Rename list
+    pub async fn rename_list(&self, id: i64, new_name: &str) -> Result<()> {
+        sqlx::query("UPDATE lists SET name = ? WHERE id = ?")
+            .bind(new_name)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .context("Failed to rename list")?;
+
+        Ok(())
+    }
+
+    /// Delete list (keeps items)
     pub async fn delete_list(&self, id: i64) -> Result<()> {
         sqlx::query("DELETE FROM lists WHERE id = ?")
             .bind(id)
@@ -580,6 +596,27 @@ impl Database {
             .context("Failed to delete list")?;
 
         Ok(())
+    }
+
+    /// Delete list and return item IDs (for caller to delete items/files)
+    pub async fn delete_list_with_items(&self, id: i64) -> Result<Vec<i64>> {
+        // First get all item IDs in the list
+        let item_ids: Vec<i64> = sqlx::query_scalar(
+            "SELECT item_id FROM list_items WHERE list_id = ?"
+        )
+            .bind(id)
+            .fetch_all(&self.pool)
+            .await
+            .context("Failed to get list items")?;
+
+        // Delete the list (CASCADE will remove list_items entries)
+        sqlx::query("DELETE FROM lists WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .context("Failed to delete list")?;
+
+        Ok(item_ids)
     }
 
     /// Delete item
@@ -621,6 +658,17 @@ impl Database {
         Ok(())
     }
 
+    /// Hard delete item (permanently remove from database)
+    pub async fn hard_delete_item(&self, id: i64) -> Result<()> {
+        sqlx::query("DELETE FROM items WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .context("Failed to hard delete item")?;
+
+        Ok(())
+    }
+
     /// Batch delete lists
     pub async fn delete_lists(&self, ids: &[i64]) -> Result<()> {
         if ids.is_empty() {
@@ -647,10 +695,17 @@ impl Database {
     // ========================================================================
 
     /// Enqueue a single search
+    ///
+    /// # Arguments
+    /// * `query` - Combined search query for Soulseek (e.g., "Artist Track")
+    /// * `artist` - Original artist from user input (optional)
+    /// * `track` - Original track name from user input (optional)
     pub async fn enqueue_search(
         &self,
         user_id: i64,
         query: &str,
+        artist: Option<&str>,
+        track: Option<&str>,
         format: Option<&str>,
         list_id: Option<i64>,
         list_position: Option<i32>,
@@ -658,13 +713,15 @@ impl Database {
     ) -> Result<QueuedSearch> {
         let queued = sqlx::query_as::<_, QueuedSearch>(
             r#"
-            INSERT INTO search_queue (user_id, query, format, list_id, list_position, status, client_id)
-            VALUES (?, ?, ?, ?, ?, 'pending', ?)
+            INSERT INTO search_queue (user_id, query, original_artist, original_track, format, list_id, list_position, status, client_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
             RETURNING *
             "#
         )
         .bind(user_id)
         .bind(query)
+        .bind(artist)
+        .bind(track)
         .bind(format)
         .bind(list_id)
         .bind(list_position)
@@ -681,16 +738,18 @@ impl Database {
     pub async fn enqueue_searches_for_list(
         &self,
         user_id: i64,
-        queries: &[String],
+        tracks: &[(String, Option<String>, Option<String>)], // (query, artist, track)
         format: Option<&str>,
         list_id: i64,
     ) -> Result<Vec<QueuedSearch>> {
-        let mut results = Vec::with_capacity(queries.len());
+        let mut results = Vec::with_capacity(tracks.len());
 
-        for (position, query) in queries.iter().enumerate() {
+        for (position, (query, artist, track)) in tracks.iter().enumerate() {
             let queued = self.enqueue_search(
                 user_id,
                 query,
+                artist.as_deref(),
+                track.as_deref(),
                 format,
                 Some(list_id),
                 Some(position as i32),
@@ -1025,5 +1084,215 @@ impl Database {
         .context("Failed to get queued search")?;
 
         Ok(queued)
+    }
+
+    // ========================================================================
+    // Metadata methods
+    // ========================================================================
+
+    /// Update item metadata from external API lookups
+    pub async fn update_item_metadata(
+        &self,
+        item_id: i64,
+        metadata: &crate::models::TrackMetadata,
+    ) -> Result<()> {
+        let sources_json = serde_json::to_string(&metadata.sources)
+            .unwrap_or_else(|_| "[]".to_string());
+
+        sqlx::query(
+            r#"
+            UPDATE items
+            SET meta_artist = ?,
+                meta_album = ?,
+                meta_title = ?,
+                meta_bpm = ?,
+                meta_key = ?,
+                meta_duration_ms = ?,
+                meta_album_art_url = ?,
+                meta_genre = ?,
+                meta_year = ?,
+                meta_track_number = ?,
+                meta_label = ?,
+                meta_musicbrainz_id = ?,
+                metadata_fetched_at = ?,
+                metadata_sources = ?
+            WHERE id = ?
+            "#
+        )
+        .bind(&metadata.artist)
+        .bind(&metadata.album)
+        .bind(&metadata.title)
+        .bind(metadata.bpm)
+        .bind(&metadata.key)
+        .bind(metadata.duration_ms)
+        .bind(&metadata.album_art_url)
+        .bind(&metadata.genre)
+        .bind(metadata.year)
+        .bind(metadata.track_number)
+        .bind(&metadata.label)
+        .bind(&metadata.musicbrainz_id)
+        .bind(metadata.fetched_at)
+        .bind(&sources_json)
+        .bind(item_id)
+        .execute(&self.pool)
+        .await
+        .context("Failed to update item metadata")?;
+
+        Ok(())
+    }
+
+    /// Get metadata for an item
+    pub async fn get_item_metadata(&self, item_id: i64) -> Result<Option<crate::models::TrackMetadata>> {
+        let row = sqlx::query(
+            r#"
+            SELECT meta_artist, meta_album, meta_title, meta_bpm, meta_key,
+                   meta_duration_ms, meta_album_art_url, meta_genre, meta_year,
+                   meta_track_number, meta_label, meta_musicbrainz_id,
+                   metadata_fetched_at, metadata_sources
+            FROM items
+            WHERE id = ?
+            "#
+        )
+        .bind(item_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to get item metadata")?;
+
+        match row {
+            Some(row) => {
+                let sources_json: Option<String> = row.get("metadata_sources");
+                let sources: Vec<String> = sources_json
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default();
+
+                let metadata = crate::models::TrackMetadata {
+                    artist: row.get("meta_artist"),
+                    album: row.get("meta_album"),
+                    title: row.get("meta_title"),
+                    bpm: row.get("meta_bpm"),
+                    key: row.get("meta_key"),
+                    duration_ms: row.get("meta_duration_ms"),
+                    album_art_url: row.get("meta_album_art_url"),
+                    genre: row.get("meta_genre"),
+                    year: row.get("meta_year"),
+                    track_number: row.get("meta_track_number"),
+                    label: row.get("meta_label"),
+                    musicbrainz_id: row.get("meta_musicbrainz_id"),
+                    fetched_at: row.get("metadata_fetched_at"),
+                    sources,
+                };
+
+                // Only return metadata if we have at least some data
+                if metadata.artist.is_some() || metadata.title.is_some() || metadata.bpm.is_some() {
+                    Ok(Some(metadata))
+                } else {
+                    Ok(None)
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Get all items that don't have metadata yet
+    /// Used for library-wide metadata scanning
+    pub async fn get_items_without_metadata(&self) -> Result<Vec<Item>> {
+        let items = sqlx::query_as::<_, Item>(
+            r#"
+            SELECT * FROM items
+            WHERE download_status = 'completed'
+              AND metadata_fetched_at IS NULL
+            ORDER BY completed_at DESC
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to get items without metadata")?;
+
+        Ok(items)
+    }
+
+    /// Clear all metadata fields for an item
+    /// Used when metadata was incorrectly applied
+    pub async fn clear_item_metadata(&self, item_id: i64) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE items
+            SET meta_artist = NULL,
+                meta_album = NULL,
+                meta_title = NULL,
+                meta_bpm = NULL,
+                meta_key = NULL,
+                meta_duration_ms = NULL,
+                meta_album_art_url = NULL,
+                meta_genre = NULL,
+                meta_year = NULL,
+                meta_track_number = NULL,
+                meta_label = NULL,
+                meta_musicbrainz_id = NULL,
+                metadata_fetched_at = NULL,
+                metadata_sources = NULL
+            WHERE id = ?
+            "#
+        )
+        .bind(item_id)
+        .execute(&self.pool)
+        .await
+        .context("Failed to clear item metadata")?;
+
+        // Also remove any rate limit entry so user can retry immediately
+        sqlx::query("DELETE FROM metadata_rate_limits WHERE item_id = ?")
+            .bind(item_id)
+            .execute(&self.pool)
+            .await
+            .context("Failed to clear metadata rate limit")?;
+
+        Ok(())
+    }
+
+    /// Check if metadata refresh is allowed (24-hour rate limit)
+    /// Returns true if refresh is allowed, false if within rate limit window
+    pub async fn check_metadata_rate_limit(&self, item_id: i64) -> Result<bool> {
+        let row = sqlx::query(
+            r#"
+            SELECT last_lookup_at FROM metadata_rate_limits
+            WHERE item_id = ?
+            "#
+        )
+        .bind(item_id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to check metadata rate limit")?;
+
+        match row {
+            Some(row) => {
+                let last_lookup: chrono::DateTime<chrono::Utc> = row.get("last_lookup_at");
+                let now = chrono::Utc::now();
+                let hours_since = (now - last_lookup).num_hours();
+
+                // Allow refresh if more than 24 hours have passed
+                Ok(hours_since >= 24)
+            }
+            None => {
+                // No rate limit record exists, so refresh is allowed
+                Ok(true)
+            }
+        }
+    }
+
+    /// Update the rate limit timestamp for metadata refresh
+    pub async fn update_metadata_rate_limit(&self, item_id: i64) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO metadata_rate_limits (item_id, last_lookup_at)
+            VALUES (?, CURRENT_TIMESTAMP)
+            ON CONFLICT(item_id) DO UPDATE SET last_lookup_at = CURRENT_TIMESTAMP
+            "#
+        )
+        .bind(item_id)
+        .execute(&self.pool)
+        .await
+        .context("Failed to update metadata rate limit")?;
+
+        Ok(())
     }
 }

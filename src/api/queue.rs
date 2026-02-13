@@ -78,24 +78,31 @@ pub async fn enqueue_search(
     user: AuthUser,
     Json(request): Json<EnqueueSearchRequest>,
 ) -> Result<Json<EnqueueSearchResponse>, (StatusCode, String)> {
-    if request.query.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "Query cannot be empty".to_string()));
+    if request.track.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Track name cannot be empty".to_string()));
     }
+
+    // Build combined query for Soulseek search
+    let query = request.search_query();
 
     match state.queue_service.enqueue_search(
         user.id,
-        &request.query,
+        &query,
+        request.artist.as_deref(),
+        Some(request.track.as_str()),
         request.format.as_deref(),
         request.client_id.as_deref(),
     ).await {
         Ok((queued, position)) => {
             tracing::info!(
-                "[Queue API] Enqueued search: id={}, query='{}', position={}, client_id={:?}",
-                queued.id, request.query, position, request.client_id
+                "[Queue API] Enqueued search: id={}, artist={:?}, track='{}', query='{}', position={}, client_id={:?}",
+                queued.id, request.artist, request.track, query, position, request.client_id
             );
             Ok(Json(EnqueueSearchResponse {
                 queue_id: queued.id,
-                query: request.query,
+                track: request.track,
+                artist: request.artist,
+                query,
                 position,
                 client_id: request.client_id,
             }))
@@ -115,23 +122,33 @@ pub async fn enqueue_list(
     user: AuthUser,
     Json(request): Json<EnqueueListRequest>,
 ) -> Result<Json<EnqueueListResponse>, (StatusCode, String)> {
-    if request.queries.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "Queries list cannot be empty".to_string()));
+    if request.tracks.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Tracks list cannot be empty".to_string()));
     }
 
-    // Filter out empty queries
-    let queries: Vec<String> = request.queries.into_iter()
-        .filter(|q| !q.trim().is_empty())
+    // Convert tracks to (query, artist, track) tuples and filter out empty tracks
+    let tracks: Vec<(String, Option<String>, Option<String>)> = request.tracks.into_iter()
+        .filter(|t| !t.track.trim().is_empty())
+        .map(|t| {
+            // Build combined query
+            let query = match &t.artist {
+                Some(artist) if !artist.trim().is_empty() => {
+                    format!("{} {}", artist.trim(), t.track.trim())
+                }
+                _ => t.track.trim().to_string(),
+            };
+            (query, t.artist, Some(t.track))
+        })
         .collect();
 
-    if queries.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "All queries are empty".to_string()));
+    if tracks.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "All tracks are empty".to_string()));
     }
 
     match state.queue_service.enqueue_list(
         user.id,
         request.name,
-        queries.clone(),
+        tracks.clone(),
         request.format,
     ).await {
         Ok((list, queued_searches)) => {

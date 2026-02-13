@@ -120,6 +120,77 @@ pub async fn batch_delete_lists(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Rename list request
+#[derive(Deserialize)]
+pub struct RenameListRequest {
+    pub name: String,
+}
+
+/// Rename a list
+pub async fn rename_list(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(payload): Json<RenameListRequest>,
+) -> Result<StatusCode, Response> {
+    tracing::info!("=== RENAME LIST REQUEST ===");
+    tracing::info!("List ID: {}, New name: {}", id, payload.name);
+
+    state.db.rename_list(id, &payload.name)
+        .await
+        .map_err(|e| {
+            tracing::error!("=== RENAME LIST FAILED ===");
+            tracing::error!("List ID: {} - Error: {}", id, e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
+                error: "Failed to rename list".to_string()
+            })).into_response()
+        })?;
+
+    tracing::info!("=== RENAME LIST SUCCESS ===");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Delete a list and all its items (hard delete)
+pub async fn delete_list_with_items(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, Response> {
+    tracing::info!("=== DELETE LIST WITH ITEMS REQUEST ===");
+    tracing::info!("List ID: {}", id);
+
+    // Get item IDs and delete list
+    let item_ids = state.db.delete_list_with_items(id)
+        .await
+        .map_err(|e| {
+            tracing::error!("=== DELETE LIST WITH ITEMS FAILED ===");
+            tracing::error!("List ID: {} - Error: {}", id, e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
+                error: "Failed to delete list".to_string()
+            })).into_response()
+        })?;
+
+    // Hard delete items and their files
+    for item_id in &item_ids {
+        // Get item to find file path
+        if let Ok(Some(item)) = state.db.get_item(*item_id).await {
+            // Delete the file
+            if !item.file_path.is_empty() {
+                if let Err(e) = tokio::fs::remove_file(&item.file_path).await {
+                    tracing::warn!("Failed to delete file {}: {}", item.file_path, e);
+                }
+            }
+        }
+        // Hard delete the item record
+        if let Err(e) = state.db.hard_delete_item(*item_id).await {
+            tracing::warn!("Failed to hard delete item {}: {}", item_id, e);
+        }
+    }
+
+    tracing::info!("=== DELETE LIST WITH ITEMS SUCCESS ===");
+    tracing::info!("Deleted list {} and {} items", id, item_ids.len());
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Remove a single item from a list (just removes the association, doesn't delete the item)
 pub async fn remove_item_from_list(
     State(state): State<AppState>,

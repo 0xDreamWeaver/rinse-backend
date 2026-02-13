@@ -60,3 +60,10 @@ zip = "0.6"
 
 # UPnP for automatic port forwarding
 igd-next = { version = "0.15", features = ["aio_tokio"] }
+
+# HTTP client for external API calls (metadata lookup)
+reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+
+# Audio file tag reading/writing (metadata embedding)
+lofty = "0.18"
+urlencoding = "2.1.3"

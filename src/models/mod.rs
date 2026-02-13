@@ -34,9 +34,29 @@ pub struct Item {
     pub download_status: String,
     pub download_progress: f64,
     pub error_message: Option<String>,
-    pub metadata: Option<String>, // JSON
+    pub metadata: Option<String>, // JSON (legacy)
     pub created_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+
+    // Separate artist/track from search (migration 009)
+    pub original_artist: Option<String>,
+    pub original_track: Option<String>,
+
+    // Track metadata from external API lookups (migration 008)
+    pub meta_artist: Option<String>,
+    pub meta_album: Option<String>,
+    pub meta_title: Option<String>,
+    pub meta_bpm: Option<i32>,
+    pub meta_key: Option<String>,
+    pub meta_duration_ms: Option<i64>,
+    pub meta_genre: Option<String>,
+    pub meta_year: Option<i32>,
+    pub meta_track_number: Option<i32>,
+    pub meta_label: Option<String>,
+    pub meta_album_art_url: Option<String>,
+    pub meta_musicbrainz_id: Option<String>,
+    pub metadata_fetched_at: Option<DateTime<Utc>>,
+    pub metadata_sources: Option<String>, // JSON array
 }
 
 /// Download status enum
@@ -153,7 +173,7 @@ pub struct SearchListRequest {
     pub format: Option<String>,
 }
 
-/// Item metadata for additional file information
+/// Item metadata for additional file information (legacy, minimal)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ItemMetadata {
     pub artist: Option<String>,
@@ -161,6 +181,68 @@ pub struct ItemMetadata {
     pub title: Option<String>,
     pub year: Option<i32>,
     pub genre: Option<String>,
+}
+
+/// Complete track metadata from external APIs and local analysis
+///
+/// This struct holds enriched metadata fetched from:
+/// - MusicBrainz: artist, album, title, year, genre, track_number, label
+/// - Cover Art Archive: album_art_url
+/// - GetSongBPM: bpm, key
+/// - Local file: duration_ms
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TrackMetadata {
+    // Must-have fields
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub title: Option<String>,
+    pub bpm: Option<i32>,
+    pub key: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub album_art_url: Option<String>,
+
+    // Nice-to-have fields
+    pub genre: Option<String>,
+    pub year: Option<i32>,
+    pub track_number: Option<i32>,
+    pub label: Option<String>,
+
+    // Source tracking
+    pub musicbrainz_id: Option<String>,
+    /// List of sources that contributed metadata (e.g., ["musicbrainz", "getsongbpm", "local"])
+    #[serde(default)]
+    pub sources: Vec<String>,
+    /// When metadata was last fetched
+    pub fetched_at: Option<DateTime<Utc>>,
+}
+
+impl TrackMetadata {
+    /// Merge another TrackMetadata into this one, preferring non-None values from other
+    pub fn merge(&mut self, other: TrackMetadata) {
+        if other.artist.is_some() { self.artist = other.artist; }
+        if other.album.is_some() { self.album = other.album; }
+        if other.title.is_some() { self.title = other.title; }
+        if other.bpm.is_some() { self.bpm = other.bpm; }
+        if other.key.is_some() { self.key = other.key; }
+        if other.duration_ms.is_some() { self.duration_ms = other.duration_ms; }
+        if other.album_art_url.is_some() { self.album_art_url = other.album_art_url; }
+        if other.genre.is_some() { self.genre = other.genre; }
+        if other.year.is_some() { self.year = other.year; }
+        if other.track_number.is_some() { self.track_number = other.track_number; }
+        if other.label.is_some() { self.label = other.label; }
+        if other.musicbrainz_id.is_some() { self.musicbrainz_id = other.musicbrainz_id; }
+        // Append sources, avoiding duplicates
+        for source in other.sources {
+            if !self.sources.contains(&source) {
+                self.sources.push(source);
+            }
+        }
+    }
+
+    /// Check if we have the minimum required metadata
+    pub fn has_core_fields(&self) -> bool {
+        self.artist.is_some() && self.title.is_some()
+    }
 }
 
 /// Email verification request
@@ -245,6 +327,10 @@ pub struct QueuedSearch {
     pub retry_count: i32,
     /// Client-generated ID for frontend tracking (prevents orphaned popups)
     pub client_id: Option<String>,
+    /// Artist name from search input (migration 009)
+    pub original_artist: Option<String>,
+    /// Track name from search input (migration 009)
+    pub original_track: Option<String>,
 }
 
 impl QueuedSearch {
@@ -257,17 +343,41 @@ impl QueuedSearch {
 /// Request to enqueue a single search
 #[derive(Debug, Deserialize)]
 pub struct EnqueueSearchRequest {
-    pub query: String,
+    /// Track name (required)
+    pub track: String,
+    /// Artist name (optional but recommended for accurate metadata)
+    pub artist: Option<String>,
     pub format: Option<String>,
     /// Client-generated ID for frontend tracking (prevents orphaned popups)
     pub client_id: Option<String>,
+}
+
+impl EnqueueSearchRequest {
+    /// Get the combined query for Soulseek search
+    /// Format: "artist track" or just "track" if no artist
+    pub fn search_query(&self) -> String {
+        match &self.artist {
+            Some(artist) if !artist.trim().is_empty() => {
+                format!("{} {}", artist.trim(), self.track.trim())
+            }
+            _ => self.track.trim().to_string(),
+        }
+    }
+}
+
+/// Individual track in a list request
+#[derive(Debug, Deserialize)]
+pub struct ListTrackRequest {
+    pub track: String,
+    pub artist: Option<String>,
 }
 
 /// Request to enqueue multiple searches (a list)
 #[derive(Debug, Deserialize)]
 pub struct EnqueueListRequest {
     pub name: Option<String>,
-    pub queries: Vec<String>,
+    /// List of tracks to search for
+    pub tracks: Vec<ListTrackRequest>,
     pub format: Option<String>,
 }
 
@@ -275,6 +385,9 @@ pub struct EnqueueListRequest {
 #[derive(Debug, Serialize)]
 pub struct EnqueueSearchResponse {
     pub queue_id: i64,
+    pub track: String,
+    pub artist: Option<String>,
+    /// Combined query used for Soulseek search
     pub query: String,
     pub position: i64,  // Position in the overall queue
     /// Client-generated ID echoed back for confirmation

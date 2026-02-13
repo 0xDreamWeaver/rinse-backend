@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use db::Database;
-use services::{DownloadService, EmailService, QueueService, QueueConfig};
+use services::{DownloadService, EmailService, QueueService, QueueConfig, MetadataService};
 use api::{AppState, create_router, create_broadcast_channel};
 
 #[tokio::main]
@@ -124,6 +124,13 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Create metadata service for track enrichment
+    tracing::info!("Initializing metadata service...");
+    let metadata_service = Arc::new(MetadataService::new(
+        db.clone(),
+        ws_broadcast.clone(),
+    ));
+
     // Create queue service
     let queue_config = QueueConfig {
         poll_interval_ms: 500,
@@ -135,6 +142,7 @@ async fn main() -> Result<()> {
         download_service.slsk_client(),  // Share the Soulseek client
         ws_broadcast.clone(),
         queue_config,
+        Arc::clone(&metadata_service),  // Share the metadata service
     ));
 
     // Perform recovery on startup (reset interrupted downloads)
@@ -163,6 +171,7 @@ async fn main() -> Result<()> {
         db,
         download_service,
         queue_service,
+        metadata_service,
         jwt_secret,
         email_service,
         ws_broadcast,
