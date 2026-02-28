@@ -97,6 +97,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/oauth/:service/callback", post(oauth::oauth_callback))
         .route("/api/oauth/:service/disconnect", delete(oauth::disconnect_oauth))
         .route("/api/oauth/:service/playlists", get(oauth::get_playlists))
+        .route("/api/oauth/:service/playlists/:playlist_id/tracks", get(oauth::get_playlist_tracks))
 
         // Health check (public)
         .route("/health", get(|| async { "OK" }))

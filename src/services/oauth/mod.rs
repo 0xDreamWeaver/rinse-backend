@@ -141,9 +141,11 @@ pub trait MusicServiceProvider: Send + Sync {
 
     /// Get the user's playlists (paginated)
     /// Returns (playlists, total_count)
+    /// If current_user_id is provided, filters to playlists the user can edit
     async fn get_user_playlists(
         &self,
         access_token: &str,
+        current_user_id: Option<&str>,
         limit: i32,
         offset: i32,
     ) -> Result<(Vec<ExternalPlaylist>, i32)>;
@@ -412,6 +414,7 @@ impl OAuthService {
     }
 
     /// Get user's playlists from a service
+    /// Only returns playlists the user has edit permissions for (owner or collaborator)
     pub async fn get_playlists(
         &self,
         user_id: i64,
@@ -419,6 +422,13 @@ impl OAuthService {
         limit: i32,
         offset: i32,
     ) -> Result<(Vec<ExternalPlaylist>, i32)> {
+        // Get connection to access external_user_id for filtering
+        let connection = self
+            .db
+            .get_oauth_connection(user_id, service.as_str())
+            .await?
+            .context("No connection found")?;
+
         let access_token = self.get_valid_access_token(user_id, service).await?;
 
         let provider = self
@@ -426,7 +436,7 @@ impl OAuthService {
             .context(format!("Service {} is not configured", service))?;
 
         provider
-            .get_user_playlists(&access_token, limit, offset)
+            .get_user_playlists(&access_token, connection.external_user_id.as_deref(), limit, offset)
             .await
     }
 

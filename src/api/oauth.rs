@@ -10,8 +10,8 @@ use serde::Deserialize;
 
 use super::{AppState, AuthUser};
 use crate::models::{
-    ExternalPlaylistResponse, OAuthCallbackRequest, OAuthCallbackResponse,
-    OAuthConnectResponse, OAuthConnectionStatus, PlaylistsResponse,
+    ExternalPlaylistResponse, ExternalTrackResponse, OAuthCallbackRequest, OAuthCallbackResponse,
+    OAuthConnectResponse, OAuthConnectionStatus, PlaylistsResponse, PlaylistTracksResponse,
 };
 use crate::services::oauth::MusicService;
 
@@ -20,6 +20,13 @@ use crate::services::oauth::MusicService;
 pub struct PlaylistsQuery {
     pub limit: Option<i32>,
     pub offset: Option<i32>,
+}
+
+/// Path parameters for playlist tracks endpoint
+#[derive(Debug, Deserialize)]
+pub struct PlaylistTracksPath {
+    pub service: String,
+    pub playlist_id: String,
 }
 
 /// Get OAuth connection status for a service
@@ -245,6 +252,62 @@ pub async fn get_playlists(
 
     Ok(Json(PlaylistsResponse {
         playlists: playlist_responses,
+        total,
+        limit,
+        offset,
+    }))
+}
+
+/// Get tracks from a specific playlist
+pub async fn get_playlist_tracks(
+    State(state): State<AppState>,
+    Path(path): Path<PlaylistTracksPath>,
+    Query(query): Query<PlaylistsQuery>,
+    user: AuthUser,
+) -> Result<Json<PlaylistTracksResponse>, (StatusCode, String)> {
+    let service = MusicService::from_str(&path.service).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Unknown service: {}", path.service),
+        )
+    })?;
+
+    let oauth_service = state.oauth_service.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "OAuth service not available".to_string(),
+        )
+    })?;
+
+    let limit = query.limit.unwrap_or(100).min(100);
+    let offset = query.offset.unwrap_or(0);
+
+    let (tracks, total) = oauth_service
+        .get_playlist_tracks(user.id, service, &path.playlist_id, limit, offset)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "[OAuth] Failed to get playlist tracks from {}: {}",
+                service,
+                e
+            );
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        })?;
+
+    let track_responses: Vec<ExternalTrackResponse> = tracks
+        .into_iter()
+        .map(|t| ExternalTrackResponse {
+            id: t.id,
+            name: t.name,
+            artists: t.artists,
+            album: t.album,
+            duration_ms: t.duration_ms,
+            external_url: t.external_url,
+        })
+        .collect();
+
+    Ok(Json(PlaylistTracksResponse {
+        tracks: track_responses,
         total,
         limit,
         offset,

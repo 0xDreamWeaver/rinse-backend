@@ -654,3 +654,23 @@ pub struct PlaylistsResponse {
     pub limit: i32,
     pub offset: i32,
 }
+
+/// External track response (from Spotify, etc.)
+#[derive(Debug, Serialize)]
+pub struct ExternalTrackResponse {
+    pub id: String,
+    pub name: String,
+    pub artists: Vec<String>,
+    pub album: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub external_url: String,
+}
+
+/// Playlist tracks list response with pagination
+#[derive(Debug, Serialize)]
+pub struct PlaylistTracksResponse {
+    pub tracks: Vec<ExternalTrackResponse>,
+    pub total: i32,
+    pub limit: i32,
+    pub offset: i32,
+}

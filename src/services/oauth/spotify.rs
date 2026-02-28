@@ -13,6 +13,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::{DateTime, Duration, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json;
 use sha2::{Digest, Sha256};
 
 const SPOTIFY_AUTH_URL: &str = "https://accounts.spotify.com/authorize";
@@ -120,9 +121,17 @@ struct SpotifyPlaylist {
     name: String,
     description: Option<String>,
     owner: SpotifyPlaylistOwner,
+    #[serde(default)]
+    collaborative: bool,
     // Feb 2026 API change: `tracks` renamed to `items`
-    items: SpotifyPlaylistItems,
-    images: Vec<SpotifyImage>,
+    // Note: `items` may be absent for playlists user doesn't own or collaborate on
+    #[serde(default)]
+    items: Option<SpotifyPlaylistItems>,
+    // Keep tracks as fallback for backwards compatibility during API transition
+    #[serde(default)]
+    tracks: Option<SpotifyPlaylistItems>,
+    // Images can be null for playlists with no cover art
+    images: Option<Vec<SpotifyImage>>,
     external_urls: SpotifyExternalUrls,
     public: Option<bool>,
 }
@@ -135,6 +144,7 @@ struct SpotifyPlaylistOwner {
 
 #[derive(Debug, Deserialize)]
 struct SpotifyPlaylistItems {
+    href: String,
     total: i32,
 }
 
@@ -148,13 +158,18 @@ struct SpotifyPlaylistTracksResponse {
 
 #[derive(Debug, Deserialize)]
 struct SpotifyPlaylistTrackItem {
-    // Feb 2026 API change: `track` renamed to `item`
+    // Feb 2026: Spotify returns BOTH fields during transition period
+    // Prefer `item` (new), fall back to `track` (old)
+    #[serde(default)]
     item: Option<SpotifyTrack>,
+    #[serde(default)]
+    track: Option<SpotifyTrack>,
 }
 
 #[derive(Debug, Deserialize)]
 struct SpotifyTrack {
-    id: String,
+    // id can be null for local tracks
+    id: Option<String>,
     name: String,
     artists: Vec<SpotifyArtist>,
     album: SpotifyAlbum,
@@ -164,13 +179,11 @@ struct SpotifyTrack {
 
 #[derive(Debug, Deserialize)]
 struct SpotifyArtist {
-    id: String,
     name: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct SpotifyAlbum {
-    id: String,
     name: String,
 }
 
@@ -361,7 +374,8 @@ impl MusicServiceProvider for SpotifyProvider {
 
         Ok(ExternalUserProfile {
             id: profile.id.clone(),
-            username: profile.id, // Spotify uses ID as username
+            // Use display_name for username, fall back to ID if not set
+            username: profile.display_name.clone().unwrap_or_else(|| profile.id.clone()),
             display_name: profile.display_name,
             profile_url: Some(profile.external_urls.spotify),
             image_url,
@@ -371,15 +385,17 @@ impl MusicServiceProvider for SpotifyProvider {
     async fn get_user_playlists(
         &self,
         access_token: &str,
+        current_user_id: Option<&str>,
         limit: i32,
         offset: i32,
     ) -> Result<(Vec<ExternalPlaylist>, i32)> {
         let limit = limit.min(50); // Spotify max is 50
 
         tracing::debug!(
-            "[Spotify] Fetching playlists: limit={}, offset={}",
+            "[Spotify] Fetching playlists: limit={}, offset={}, user_id={:?}",
             limit,
-            offset
+            offset,
+            current_user_id
         );
 
         let response = self
@@ -391,44 +407,71 @@ impl MusicServiceProvider for SpotifyProvider {
             .await
             .context("Failed to fetch Spotify playlists")?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
+        let status = response.status();
+        let response_text = response.text().await.unwrap_or_default();
+
+        if !status.is_success() {
             tracing::error!(
                 "[Spotify] Playlists fetch failed: status={}, body={}",
                 status,
-                error_text
+                response_text
             );
             anyhow::bail!("Failed to fetch Spotify playlists: {}", status);
         }
 
-        let playlists_response: SpotifyPlaylistsResponse = response
-            .json()
-            .await
-            .context("Failed to parse Spotify playlists response")?;
+        // Log first 2000 chars of response for debugging
+        tracing::debug!(
+            "[Spotify] Playlists response: {}",
+            &response_text.chars().collect::<String>()
+        );
 
+        let playlists_response: SpotifyPlaylistsResponse = serde_json::from_str(&response_text)
+            .context(format!(
+                "Failed to parse Spotify playlists response. First 500 chars: {}",
+                &response_text.chars().collect::<String>()
+            ))?;
+
+        // Filter to playlists user can edit (owner or collaborator)
         let playlists: Vec<ExternalPlaylist> = playlists_response
             .items
             .into_iter()
-            .map(|p| ExternalPlaylist {
-                id: p.id,
-                name: p.name,
-                description: p.description,
-                owner_name: p.owner.display_name.unwrap_or(p.owner.id),
-                track_count: p.items.total,
-                image_url: p.images.first().map(|img| img.url.clone()),
-                external_url: p.external_urls.spotify,
-                is_public: p.public.unwrap_or(false),
+            .filter(|p| {
+                // If no user ID provided, return all playlists
+                let Some(user_id) = current_user_id else {
+                    return true;
+                };
+                // User owns the playlist OR it's collaborative
+                p.owner.id == user_id || p.collaborative
+            })
+            .map(|p| {
+                // Feb 2026: prefer `items` field, fall back to `tracks` for compatibility
+                let track_count = p.items
+                    .map(|i| i.total)
+                    .or_else(|| p.tracks.map(|t| t.total))
+                    .unwrap_or(0);
+
+                ExternalPlaylist {
+                    id: p.id,
+                    name: p.name,
+                    description: p.description,
+                    owner_name: p.owner.display_name.unwrap_or(p.owner.id),
+                    track_count,
+                    image_url: p.images.as_ref().and_then(|imgs| imgs.first()).map(|img| img.url.clone()),
+                    external_url: p.external_urls.spotify,
+                    is_public: p.public.unwrap_or(false),
+                }
             })
             .collect();
 
+        let filtered_count = playlists.len() as i32;
+
         tracing::debug!(
-            "[Spotify] Fetched {} playlists (total: {})",
-            playlists.len(),
+            "[Spotify] Fetched {} editable playlists (total from API: {})",
+            filtered_count,
             playlists_response.total
         );
 
-        Ok((playlists, playlists_response.total))
+        Ok((playlists, filtered_count))
     }
 
     async fn get_playlist(&self, access_token: &str, playlist_id: &str) -> Result<ExternalPlaylist> {
@@ -458,13 +501,19 @@ impl MusicServiceProvider for SpotifyProvider {
             .await
             .context("Failed to parse Spotify playlist response")?;
 
+        // Feb 2026: prefer `items` field, fall back to `tracks` for compatibility
+        let track_count = playlist.items
+            .map(|i| i.total)
+            .or_else(|| playlist.tracks.map(|t| t.total))
+            .unwrap_or(0);
+
         Ok(ExternalPlaylist {
             id: playlist.id,
             name: playlist.name,
             description: playlist.description,
             owner_name: playlist.owner.display_name.unwrap_or(playlist.owner.id),
-            track_count: playlist.items.total,
-            image_url: playlist.images.first().map(|img| img.url.clone()),
+            track_count,
+            image_url: playlist.images.as_ref().and_then(|imgs| imgs.first()).map(|img| img.url.clone()),
             external_url: playlist.external_urls.spotify,
             is_public: playlist.public.unwrap_or(false),
         })
@@ -499,34 +548,47 @@ impl MusicServiceProvider for SpotifyProvider {
             .await
             .context("Failed to fetch Spotify playlist items")?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
+        let status = response.status();
+        let response_text = response.text().await.unwrap_or_default();
+
+        if !status.is_success() {
             tracing::error!(
                 "[Spotify] Playlist tracks fetch failed: status={}, body={}",
                 status,
-                error_text
+                response_text
             );
             anyhow::bail!("Failed to fetch Spotify playlist tracks: {}", status);
         }
 
-        let tracks_response: SpotifyPlaylistTracksResponse = response
-            .json()
-            .await
-            .context("Failed to parse Spotify playlist tracks response")?;
+        // Log raw response for debugging
+        tracing::debug!(
+            "[Spotify] Playlist tracks response: {}",
+            &response_text
+        );
 
-        // Feb 2026 API change: nested field renamed from `track` to `item`
+        let tracks_response: SpotifyPlaylistTracksResponse = serde_json::from_str(&response_text)
+            .context(format!(
+                "Failed to parse Spotify playlist tracks response: {}",
+                response_text.chars().collect::<String>()
+            ))?;
+
+        // Feb 2026: Spotify returns both `item` (new) and `track` (old) fields
+        // Prefer `item`, fall back to `track`, skip entries with no track data
         let tracks: Vec<ExternalTrack> = tracks_response
             .items
             .into_iter()
             .filter_map(|entry| {
-                entry.item.map(|t| ExternalTrack {
-                    id: t.id,
-                    name: t.name,
-                    artists: t.artists.into_iter().map(|a| a.name).collect(),
-                    album: Some(t.album.name),
-                    duration_ms: Some(t.duration_ms),
-                    external_url: t.external_urls.spotify,
+                // Prefer new `item` field, fall back to old `track` field
+                let track = entry.item.or(entry.track)?;
+                // Skip local tracks (no Spotify ID)
+                let id = track.id?;
+                Some(ExternalTrack {
+                    id,
+                    name: track.name,
+                    artists: track.artists.into_iter().map(|a| a.name).collect(),
+                    album: Some(track.album.name),
+                    duration_ms: Some(track.duration_ms),
+                    external_url: track.external_urls.spotify,
                 })
             })
             .collect();
