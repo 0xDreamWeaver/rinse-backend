@@ -9,7 +9,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use db::Database;
-use services::{DownloadService, EmailService, QueueService, QueueConfig, MetadataService};
+use services::{DownloadService, EmailService, QueueService, QueueConfig, MetadataService, OAuthService};
+use services::oauth::spotify::SpotifyProvider;
 use api::{AppState, create_router, create_broadcast_channel};
 
 #[tokio::main]
@@ -131,6 +132,30 @@ async fn main() -> Result<()> {
         ws_broadcast.clone(),
     ));
 
+    // Initialize OAuth service (optional - requires SPOTIFY_CLIENT_ID for Spotify)
+    let oauth_service = if SpotifyProvider::is_configured() {
+        tracing::info!("Spotify OAuth configured, initializing OAuthService...");
+        let redirect_base = std::env::var("OAUTH_REDIRECT_BASE")
+            .unwrap_or_else(|_| "http://localhost:5173".to_string());
+
+        let http_client = reqwest::Client::new();
+        match SpotifyProvider::new(http_client) {
+            Ok(spotify_provider) => {
+                let mut service = OAuthService::new(db.clone(), &jwt_secret, redirect_base);
+                service.register_provider(Arc::new(spotify_provider));
+                tracing::info!("OAuthService initialized with Spotify provider");
+                Some(Arc::new(service))
+            }
+            Err(e) => {
+                tracing::error!("Failed to create SpotifyProvider: {}", e);
+                None
+            }
+        }
+    } else {
+        tracing::info!("Spotify OAuth not configured (SPOTIFY_CLIENT_ID not set)");
+        None
+    };
+
     // Create queue service
     let queue_config = QueueConfig {
         poll_interval_ms: 500,
@@ -172,6 +197,7 @@ async fn main() -> Result<()> {
         download_service,
         queue_service,
         metadata_service,
+        oauth_service,
         jwt_secret,
         email_service,
         ws_broadcast,

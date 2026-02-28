@@ -25,6 +25,7 @@
 //! Manual refresh is limited to once per 24 hours per track.
 
 pub mod coverart;
+pub mod discogs;
 pub mod getsongbpm;
 pub mod musicbrainz;
 pub mod tags;
@@ -46,6 +47,7 @@ use crate::db::Database;
 use crate::models::TrackMetadata;
 
 use coverart::CoverArtClient;
+use discogs::DiscogsClient;
 use getsongbpm::GetSongBpmClient;
 use musicbrainz::MusicBrainzClient;
 
@@ -55,6 +57,7 @@ pub struct MetadataService {
     ws_broadcast: broadcast::Sender<crate::api::WsEvent>,
     http_client: Client,
     musicbrainz: MusicBrainzClient,
+    discogs: DiscogsClient,
     coverart: CoverArtClient,
     getsongbpm: GetSongBpmClient,
     /// Last MusicBrainz API call time (for rate limiting)
@@ -103,6 +106,7 @@ impl MetadataService {
         );
 
         let musicbrainz = MusicBrainzClient::new(http_client.clone(), &contact_email);
+        let discogs = DiscogsClient::new(http_client.clone());
         let coverart = CoverArtClient::new(http_client.clone());
         let getsongbpm = GetSongBpmClient::new(http_client.clone(), getsongbpm_api_key);
 
@@ -110,8 +114,9 @@ impl MetadataService {
         let last_mb_call = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(10)));
 
         tracing::info!(
-            "[MetadataService] Initialized with contact_email={}, getsongbpm_configured={}",
+            "[MetadataService] Initialized with contact_email={}, discogs_configured={}, getsongbpm_configured={}",
             contact_email,
+            discogs.is_configured(),
             getsongbpm.is_configured()
         );
 
@@ -120,6 +125,7 @@ impl MetadataService {
             ws_broadcast,
             http_client,
             musicbrainz,
+            discogs,
             coverart,
             getsongbpm,
             last_mb_call,
@@ -175,7 +181,7 @@ impl MetadataService {
             }
         }
 
-        // Step 2: Query MusicBrainz (with rate limiting)
+        // Step 2: Query MusicBrainz (with rate limiting), fallback to Discogs
         // Use precise search if we have both artist and track, otherwise use query
         self.wait_for_rate_limit().await;
         let mb_result = match (artist, track) {
@@ -194,10 +200,13 @@ impl MetadataService {
                 self.musicbrainz.search_recording(query).await
             }
         };
+
+        let mut got_metadata_from_primary = false;
         match mb_result {
             Ok(mb_metadata) => {
                 let release_mbid = mb_metadata.musicbrainz_id.clone();
                 metadata.merge(mb_metadata);
+                got_metadata_from_primary = true;
                 tracing::info!(
                     "[MetadataService] MusicBrainz found: artist={:?}, title={:?}",
                     metadata.artist,
@@ -205,7 +214,7 @@ impl MetadataService {
                 );
 
                 // Step 3: Get album art from Cover Art Archive (only if we have MBID)
-                if let Some(ref mbid) = release_mbid {
+                if let Some(ref _mbid) = release_mbid {
                     // MusicBrainz recording ID is for the recording, we need release ID
                     // Let's try to get it from a separate lookup
                     self.wait_for_rate_limit().await;
@@ -239,6 +248,58 @@ impl MetadataService {
             Err(e) => {
                 errors.push(format!("musicbrainz: {}", e));
                 tracing::warn!("[MetadataService] MusicBrainz lookup failed: {}", e);
+            }
+        }
+
+        // Step 2b: Fallback to Discogs if MusicBrainz failed or returned incomplete data
+        if !got_metadata_from_primary || metadata.artist.is_none() {
+            tracing::info!("[MetadataService] Trying Discogs as fallback");
+            let discogs_result = match (artist, track) {
+                (Some(a), Some(t)) if !a.is_empty() && !t.is_empty() => {
+                    self.discogs.search_release_precise(a, t).await
+                }
+                _ => {
+                    self.discogs.search_release(query).await
+                }
+            };
+            match discogs_result {
+                Ok(discogs_metadata) => {
+                    // Merge Discogs data, preferring existing MusicBrainz data
+                    if metadata.artist.is_none() {
+                        metadata.artist = discogs_metadata.artist;
+                    }
+                    if metadata.album.is_none() {
+                        metadata.album = discogs_metadata.album;
+                    }
+                    if metadata.title.is_none() {
+                        metadata.title = discogs_metadata.title;
+                    }
+                    if metadata.year.is_none() {
+                        metadata.year = discogs_metadata.year;
+                    }
+                    if metadata.genre.is_none() {
+                        metadata.genre = discogs_metadata.genre;
+                    }
+                    if metadata.label.is_none() {
+                        metadata.label = discogs_metadata.label;
+                    }
+                    // Use Discogs album art if we don't have one from Cover Art Archive
+                    if metadata.album_art_url.is_none() {
+                        metadata.album_art_url = discogs_metadata.album_art_url;
+                    }
+                    if !metadata.sources.contains(&"discogs".to_string()) {
+                        metadata.sources.push("discogs".to_string());
+                    }
+                    tracing::info!(
+                        "[MetadataService] Discogs merged: artist={:?}, title={:?}",
+                        metadata.artist,
+                        metadata.title
+                    );
+                }
+                Err(e) => {
+                    errors.push(format!("discogs: {}", e));
+                    tracing::warn!("[MetadataService] Discogs lookup failed: {}", e);
+                }
             }
         }
 

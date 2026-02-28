@@ -22,6 +22,7 @@
 //!     Update DB + Broadcast WebSocket
 //! ```
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use std::path::{Path, PathBuf};
@@ -32,6 +33,7 @@ use anyhow::{Result, bail};
 use crate::db::Database;
 use crate::models::{QueuedSearch, List, Item, QueueStatus, QueueStatusResponse};
 use crate::protocol::{SoulseekClient, DownloadInitResult, ArcProgressCallback};
+use crate::protocol::file_selection::ScoredFile;
 use crate::api::WsEvent;
 use crate::services::FuzzyMatcher;
 use crate::services::MetadataService;
@@ -89,6 +91,9 @@ pub struct QueueService {
     transfer_completion_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<TransferCompletion>>>,
     /// Metadata service for enriching downloaded tracks
     metadata_service: Arc<MetadataService>,
+    /// Cached search candidates by queue_id for retry without re-searching
+    /// When a download fails, we try the next candidate from this list
+    pending_candidates: Arc<RwLock<HashMap<i64, Vec<ScoredFile>>>>,
 }
 
 impl QueueService {
@@ -110,6 +115,7 @@ impl QueueService {
             transfer_completion_tx: tx,
             transfer_completion_rx: Arc::new(tokio::sync::Mutex::new(rx)),
             metadata_service,
+            pending_candidates: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -450,6 +456,20 @@ impl QueueService {
                             tracing::error!("[QueueWorker] Failed to delete completed search: {}", e);
                         }
 
+                        // Add to search history
+                        if let Err(e) = self.db.insert_search_history(
+                            queued.user_id,
+                            &query,
+                            queued.original_artist.as_deref(),
+                            queued.original_track.as_deref(),
+                            queued.format.as_deref(),
+                            "completed",
+                            Some(item.id),
+                            None,
+                        ).await {
+                            tracing::error!("[QueueWorker] Failed to insert search history: {}", e);
+                        }
+
                         tracing::info!(
                             "[QueueWorker] Search completed (immediate): queue_id={}, item_id={}",
                             queue_id, item.id
@@ -513,6 +533,20 @@ impl QueueService {
                     // Delete the queue entry
                     if let Err(e) = self.db.delete_search(queue_id).await {
                         tracing::error!("[QueueWorker] Failed to delete failed search: {}", e);
+                    }
+
+                    // Add to search history as failed
+                    if let Err(e) = self.db.insert_search_history(
+                        queued.user_id,
+                        &query,
+                        queued.original_artist.as_deref(),
+                        queued.original_track.as_deref(),
+                        queued.format.as_deref(),
+                        "failed",
+                        None,
+                        Some(&error_msg),
+                    ).await {
+                        tracing::error!("[QueueWorker] Failed to insert search history: {}", e);
                     }
 
                     // If this is part of a list, update list progress
@@ -586,66 +620,110 @@ impl QueueService {
             return Ok(existing.clone());
         }
 
-        // Acquire Soulseek client lock
+        // Acquire Soulseek client lock (needed for both search and download)
         let mut client_guard = self.slsk_client.write().await;
         let client = client_guard.as_mut()
             .ok_or_else(|| anyhow::anyhow!("Not connected to Soulseek"))?;
 
-        // Execute search
-        tracing::info!("[QueueWorker] Sending search query to Soulseek network...");
-        let results = client.search(query, self.config.search_timeout_secs).await?;
+        // Check for cached candidates from previous failed attempt
+        let mut scored_file: Option<ScoredFile> = None;
+        let mut used_cached = false;
 
-        let total_files: usize = results.iter().map(|r| r.files.len()).sum();
-        tracing::info!(
-            "[QueueWorker] Search completed: {} users returned {} files",
-            results.len(), total_files
-        );
-
-        // Broadcast search progress
-        self.broadcast(WsEvent::SearchProgress {
-            item_id: 0,
-            results_count: total_files,
-            users_count: results.len(),
-            client_id: client_id.clone(),
-        });
-
-        if results.is_empty() {
-            self.broadcast(WsEvent::SearchCompleted {
-                item_id: 0,
-                results_count: 0,
-                selected_file: None,
-                selected_user: None,
-                client_id: client_id.clone(),
-            });
-            bail!("No results found for query: {}", query);
+        {
+            let mut candidates = self.pending_candidates.write().await;
+            if let Some(cached) = candidates.get_mut(&queue_id) {
+                if !cached.is_empty() {
+                    // Pop the first candidate (best remaining)
+                    scored_file = Some(cached.remove(0));
+                    used_cached = true;
+                    tracing::info!(
+                        "[QueueWorker] Using cached candidate #{} for queue_id={} ({} remaining)",
+                        queued.retry_count + 1,
+                        queue_id,
+                        cached.len()
+                    );
+                }
+            }
         }
 
-        // Select best file
-        let scored_file = SoulseekClient::get_best_file(&results, query, format)
-            .ok_or_else(|| {
-                if format.is_some() {
-                    anyhow::anyhow!("No {} files found matching query", format.unwrap().to_uppercase())
+        // If no cached candidates, do a fresh search
+        if scored_file.is_none() {
+            // Execute search
+            tracing::info!("[QueueWorker] Sending search query to Soulseek network...");
+            let results = client.search(query, self.config.search_timeout_secs).await?;
+
+            let total_files: usize = results.iter().map(|r| r.files.len()).sum();
+            tracing::info!(
+                "[QueueWorker] Search completed: {} users returned {} files",
+                results.len(), total_files
+            );
+
+            // Broadcast search progress
+            self.broadcast(WsEvent::SearchProgress {
+                item_id: 0,
+                results_count: total_files,
+                users_count: results.len(),
+                client_id: client_id.clone(),
+            });
+
+            if results.is_empty() {
+                self.broadcast(WsEvent::SearchCompleted {
+                    item_id: 0,
+                    results_count: 0,
+                    selected_file: None,
+                    selected_user: None,
+                    client_id: client_id.clone(),
+                });
+                bail!("No results found for query: {}", query);
+            }
+
+            // Get ALL candidates sorted by score
+            let mut all_candidates = SoulseekClient::get_best_files(&results, query, format);
+
+            if all_candidates.is_empty() {
+                bail!(if format.is_some() {
+                    format!("No {} files found matching query", format.unwrap().to_uppercase())
                 } else {
-                    anyhow::anyhow!("No suitable files found matching query")
-                }
-            })?;
+                    "No suitable files found matching query".to_string()
+                });
+            }
+
+            // Take the first (best) candidate
+            let selected = all_candidates.remove(0);
+
+            // Broadcast search completed with actual results count
+            self.broadcast(WsEvent::SearchCompleted {
+                item_id: 0,
+                results_count: total_files,
+                selected_file: Some(extract_basename(&selected.filename).to_string()),
+                selected_user: Some(selected.username.clone()),
+                client_id: client_id.clone(),
+            });
+
+            scored_file = Some(selected);
+
+            // Cache remaining candidates for retry (limit to top 5 alternatives)
+            let candidates_to_cache: Vec<ScoredFile> = all_candidates.into_iter().take(5).collect();
+            if !candidates_to_cache.is_empty() {
+                tracing::info!(
+                    "[QueueWorker] Caching {} alternative candidates for queue_id={}",
+                    candidates_to_cache.len(),
+                    queue_id
+                );
+                self.pending_candidates.write().await.insert(queue_id, candidates_to_cache);
+            }
+        }
+
+        let scored_file = scored_file.unwrap();
 
         tracing::info!(
-            "[QueueWorker] Selected '{}' from '{}' (score={:.1}, {:?} kbps)",
+            "[QueueWorker] Selected '{}' from '{}' (score={:.1}, {:?} kbps){}",
             scored_file.filename,
             scored_file.username,
             scored_file.score,
-            scored_file.bitrate
+            scored_file.bitrate,
+            if used_cached { " [from cache]" } else { "" }
         );
-
-        // Broadcast search completed
-        self.broadcast(WsEvent::SearchCompleted {
-            item_id: 0,
-            results_count: total_files,
-            selected_file: Some(extract_basename(&scored_file.filename).to_string()),
-            selected_user: Some(scored_file.username.clone()),
-            client_id: client_id.clone(),
-        });
 
         // Prepare file info
         let remote_filename = scored_file.filename.clone();
@@ -892,6 +970,19 @@ impl QueueService {
     async fn handle_transfer_completion(&self, completion: TransferCompletion) {
         let TransferCompletion { item_id, queue_id, list_id, list_position: _, result, client_id } = completion;
 
+        // Get the queued search data before we delete it (needed for history)
+        let queued = match self.db.get_queued_search(queue_id).await {
+            Ok(Some(q)) => Some(q),
+            Ok(None) => {
+                tracing::warn!("[TransferMonitor] Queue entry {} not found", queue_id);
+                None
+            }
+            Err(e) => {
+                tracing::error!("[TransferMonitor] Failed to get queue entry: {}", e);
+                None
+            }
+        };
+
         match result {
             Ok(bytes) => {
                 tracing::info!(
@@ -981,6 +1072,25 @@ impl QueueService {
                     tracing::error!("[TransferMonitor] Failed to delete completed queue entry: {}", e);
                 }
 
+                // Clean up cached candidates (no longer needed)
+                self.pending_candidates.write().await.remove(&queue_id);
+
+                // Add to search history
+                if let Some(ref q) = queued {
+                    if let Err(e) = self.db.insert_search_history(
+                        q.user_id,
+                        &q.query,
+                        q.original_artist.as_deref(),
+                        q.original_track.as_deref(),
+                        q.format.as_deref(),
+                        "completed",
+                        Some(item_id),
+                        None,
+                    ).await {
+                        tracing::error!("[TransferMonitor] Failed to insert search history: {}", e);
+                    }
+                }
+
                 // Update list progress if applicable
                 if let Some(list_id) = list_id {
                     self.update_list_progress(list_id).await;
@@ -999,18 +1109,8 @@ impl QueueService {
                     tracing::error!("[TransferMonitor] Failed to update item status: {}", e);
                 }
 
-                // Get the queue entry to check retry_count
-                let retry_count = match self.db.get_queued_search(queue_id).await {
-                    Ok(Some(queued)) => queued.retry_count,
-                    Ok(None) => {
-                        tracing::warn!("[TransferMonitor] Queue entry {} not found, cannot retry", queue_id);
-                        1 // Treat as already retried to avoid infinite loops
-                    }
-                    Err(e) => {
-                        tracing::error!("[TransferMonitor] Failed to get queue entry: {}", e);
-                        1 // Treat as already retried
-                    }
-                };
+                // Get retry_count from pre-fetched queued search
+                let retry_count = queued.as_ref().map(|q| q.retry_count).unwrap_or(1);
 
                 // Get item info for broadcast
                 let item_filename = if let Ok(Some(item)) = self.db.get_item(item_id).await {
@@ -1045,27 +1145,71 @@ impl QueueService {
                         client_id: client_id.clone(),
                     });
                 } else {
-                    // Retry also failed - permanent failure
-                    tracing::warn!(
-                        "[TransferMonitor] Transfer failed permanently (retry exhausted): queue_id={}, item_id={}",
-                        queue_id, item_id
-                    );
+                    // Check if we have more cached candidates to try
+                    let has_more_candidates = {
+                        let candidates = self.pending_candidates.read().await;
+                        candidates.get(&queue_id).map(|c| !c.is_empty()).unwrap_or(false)
+                    };
 
-                    // Delete the queue entry
-                    if let Err(e) = self.db.delete_search(queue_id).await {
-                        tracing::error!("[TransferMonitor] Failed to delete failed queue entry: {}", e);
-                    }
+                    if has_more_candidates {
+                        // We have more candidates - mark for retry to try next one
+                        tracing::info!(
+                            "[TransferMonitor] Transfer failed, trying next cached candidate: queue_id={}, item_id={}",
+                            queue_id, item_id
+                        );
 
-                    // Broadcast permanent failure
-                    self.broadcast(WsEvent::DownloadFailed {
-                        item_id,
-                        error: error_msg,
-                        client_id,
-                    });
+                        if let Err(e) = self.db.mark_search_for_retry(queue_id, &error_msg).await {
+                            tracing::error!("[TransferMonitor] Failed to mark for retry: {}", e);
+                        }
 
-                    // Update list progress if applicable
-                    if let Some(list_id) = list_id {
-                        self.update_list_progress(list_id).await;
+                        // Broadcast failure with retry note
+                        self.broadcast(WsEvent::DownloadFailed {
+                            item_id,
+                            error: format!("{} (trying next candidate)", error_msg),
+                            client_id: client_id.clone(),
+                        });
+                    } else {
+                        // No more candidates - permanent failure
+                        tracing::warn!(
+                            "[TransferMonitor] Transfer failed permanently (no more candidates): queue_id={}, item_id={}",
+                            queue_id, item_id
+                        );
+
+                        // Clean up cached candidates
+                        self.pending_candidates.write().await.remove(&queue_id);
+
+                        // Delete the queue entry
+                        if let Err(e) = self.db.delete_search(queue_id).await {
+                            tracing::error!("[TransferMonitor] Failed to delete failed queue entry: {}", e);
+                        }
+
+                        // Add to search history as failed
+                        if let Some(ref q) = queued {
+                            if let Err(e) = self.db.insert_search_history(
+                                q.user_id,
+                                &q.query,
+                                q.original_artist.as_deref(),
+                                q.original_track.as_deref(),
+                                q.format.as_deref(),
+                                "failed",
+                                Some(item_id),
+                                Some(&error_msg),
+                            ).await {
+                                tracing::error!("[TransferMonitor] Failed to insert search history: {}", e);
+                            }
+                        }
+
+                        // Broadcast permanent failure
+                        self.broadcast(WsEvent::DownloadFailed {
+                            item_id,
+                            error: error_msg,
+                            client_id,
+                        });
+
+                        // Update list progress if applicable
+                        if let Some(list_id) = list_id {
+                            self.update_list_progress(list_id).await;
+                        }
                     }
                 }
             }

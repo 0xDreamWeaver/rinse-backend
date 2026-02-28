@@ -286,7 +286,7 @@ pub struct ScoredFile {
     pub peer_port: u32,
 }
 
-/// Find the best file from search results based on scoring
+/// Find all matching files from search results, sorted by score (best first)
 ///
 /// This considers:
 /// - Title match score
@@ -295,20 +295,22 @@ pub struct ScoredFile {
 /// - User's upload speed and queue length
 /// - Whether user has free slots
 ///
+/// Returns all candidates with score > 50, sorted by score descending.
+/// Use this when you need to try multiple candidates on failure.
+///
 /// format_filter: Optional format filter ("mp3", "flac", "m4a", "wav")
-pub fn find_best_file(
+pub fn find_best_files(
     results: &[SearchResult],
     query: &str,
     format_filter: Option<&str>,
-) -> Option<ScoredFile> {
+) -> Vec<ScoredFile> {
     let (_, expected_title) = parse_query(query);
     let title_to_match = expected_title.unwrap_or_default();
 
     if title_to_match.is_empty() {
-        return None;
+        return Vec::new();
     }
 
-    // Collect all candidates first for logging
     let mut candidates: Vec<ScoredFile> = Vec::new();
 
     // First pass: only consider peers with free slots
@@ -325,7 +327,6 @@ pub fn find_best_file(
             let base_score = score_file(&file.filename, file.size, file.bitrate(), &title_to_match, query);
 
             // Add speed bonus (0-25 points based on upload speed)
-            // 1 MB/s (1024 KB/s) = full bonus, scale linearly
             let speed_kbps = result.avg_speed as f64 / 1024.0;
             let speed_bonus = (speed_kbps / 1024.0).min(1.0) * 25.0;
 
@@ -352,7 +353,7 @@ pub fn find_best_file(
         }
     }
 
-    // Sort candidates by score (highest first) and log top candidates
+    // Sort candidates by score (highest first)
     candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
     if !candidates.is_empty() {
@@ -377,43 +378,60 @@ pub fn find_best_file(
         }
     }
 
-    let best = candidates.into_iter().next();
+    candidates
+}
+
+/// Find the best file from search results based on scoring
+///
+/// This is a convenience wrapper around `find_best_files()` that returns
+/// only the top-scoring file. Use `find_best_files()` directly if you need
+/// to try multiple candidates on failure.
+///
+/// format_filter: Optional format filter ("mp3", "flac", "m4a", "wav")
+pub fn find_best_file(
+    results: &[SearchResult],
+    query: &str,
+    format_filter: Option<&str>,
+) -> Option<ScoredFile> {
+    let candidates = find_best_files(results, query, format_filter);
+
+    if let Some(best) = candidates.into_iter().next() {
+        return Some(best);
+    }
 
     // If no good match from free peers, fall back to any audio file
-    if best.is_none() {
-        tracing::warn!("No good title match found from free peers, falling back to any audio file");
+    tracing::warn!("No good title match found from free peers, falling back to any audio file");
 
-        for result in results {
-            // Still prefer free peers in fallback
-            if !result.has_slots && results.iter().any(|r| r.has_slots) {
+    for result in results {
+        // Still prefer free peers in fallback
+        if !result.has_slots && results.iter().any(|r| r.has_slots) {
+            continue;
+        }
+
+        for file in &result.files {
+            if !is_audio_file(&file.filename) || !matches_format(&file.filename, format_filter) {
                 continue;
             }
 
-            for file in &result.files {
-                if !is_audio_file(&file.filename) || !matches_format(&file.filename, format_filter) {
-                    continue;
-                }
-
-                let size_mb = file.size as f64 / 1_048_576.0;
-                if size_mb >= 1.0 && size_mb <= 50.0 {
-                    return Some(ScoredFile {
-                        username: result.username.clone(),
-                        filename: file.filename.clone(),
-                        size: file.size,
-                        bitrate: file.bitrate(),
-                        score: 0.0,
-                        slot_free: result.has_slots,
-                        avg_speed: result.avg_speed,
-                        queue_length: result.queue_length,
-                        peer_ip: result.peer_ip.clone(),
-                        peer_port: result.peer_port,
-                    });
-                }
+            let size_mb = file.size as f64 / 1_048_576.0;
+            if size_mb >= 1.0 && size_mb <= 50.0 {
+                return Some(ScoredFile {
+                    username: result.username.clone(),
+                    filename: file.filename.clone(),
+                    size: file.size,
+                    bitrate: file.bitrate(),
+                    score: 0.0,
+                    slot_free: result.has_slots,
+                    avg_speed: result.avg_speed,
+                    queue_length: result.queue_length,
+                    peer_ip: result.peer_ip.clone(),
+                    peer_port: result.peer_port,
+                });
             }
         }
     }
 
-    best
+    None
 }
 
 #[cfg(test)]

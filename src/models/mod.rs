@@ -340,6 +340,21 @@ impl QueuedSearch {
     }
 }
 
+/// Search history entry with username for display
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct SearchHistoryEntry {
+    pub id: i64,
+    pub user_id: i64,
+    pub username: String,
+    pub query: String,
+    pub original_artist: Option<String>,
+    pub original_track: Option<String>,
+    pub status: String,
+    pub error_message: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
 /// Request to enqueue a single search
 #[derive(Debug, Deserialize)]
 pub struct EnqueueSearchRequest {
@@ -411,4 +426,231 @@ pub struct QueueStatusResponse {
     pub active_downloads: i64,  // Items with status 'downloading'
     pub user_pending: i64,      // This user's pending items
     pub user_processing: i64,   // This user's processing items
+}
+
+// ============================================================================
+// OAuth Models
+// ============================================================================
+
+/// OAuth connection for external services
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct OAuthConnection {
+    pub id: i64,
+    pub user_id: i64,
+    pub service: String,
+    pub external_user_id: Option<String>,
+    pub external_username: Option<String>,
+    #[serde(skip_serializing)]
+    pub access_token_encrypted: String,
+    #[serde(skip_serializing)]
+    pub refresh_token_encrypted: Option<String>,
+    pub token_expires_at: Option<DateTime<Utc>>,
+    pub scopes: Option<String>,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+/// OAuth pending state for PKCE flow
+#[derive(Debug, Clone, FromRow)]
+pub struct OAuthPendingState {
+    pub id: i64,
+    pub user_id: i64,
+    pub service: String,
+    pub state: String,
+    pub code_verifier: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Playlist import record
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct PlaylistImport {
+    pub id: i64,
+    pub user_id: i64,
+    pub service: String,
+    pub external_playlist_id: String,
+    pub external_playlist_name: Option<String>,
+    pub external_playlist_url: Option<String>,
+    pub external_owner_name: Option<String>,
+    pub list_id: Option<i64>,
+    pub total_tracks: i32,
+    pub imported_tracks: i32,
+    pub failed_tracks: i32,
+    pub skipped_tracks: i32,
+    pub status: String,
+    pub error_message: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// Failed import track (for retry)
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct FailedImportTrack {
+    pub id: i64,
+    pub playlist_import_id: i64,
+    pub external_track_id: Option<String>,
+    pub artist_name: String,
+    pub track_name: String,
+    pub album_name: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub failure_reason: Option<String>,
+    pub retry_count: i32,
+    pub last_retry_at: Option<DateTime<Utc>>,
+    pub status: String,
+    pub item_id: Option<i64>,
+    pub created_at: DateTime<Utc>,
+}
+
+// ============================================================================
+// OAuth API Request/Response Types
+// ============================================================================
+
+/// OAuth connection status response (for frontend display)
+#[derive(Debug, Serialize)]
+pub struct OAuthConnectionStatus {
+    pub service: String,
+    pub connected: bool,
+    pub username: Option<String>,
+    pub connected_at: Option<DateTime<Utc>>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+impl From<OAuthConnection> for OAuthConnectionStatus {
+    fn from(conn: OAuthConnection) -> Self {
+        Self {
+            service: conn.service,
+            connected: conn.status == "active",
+            username: conn.external_username,
+            connected_at: Some(conn.created_at),
+            last_used_at: conn.last_used_at,
+        }
+    }
+}
+
+/// OAuth connect response
+#[derive(Debug, Serialize)]
+pub struct OAuthConnectResponse {
+    pub auth_url: String,
+    pub state: String,
+}
+
+/// OAuth callback request
+#[derive(Debug, Deserialize)]
+pub struct OAuthCallbackRequest {
+    pub code: String,
+    pub state: String,
+}
+
+/// OAuth callback response
+#[derive(Debug, Serialize)]
+pub struct OAuthCallbackResponse {
+    pub connected: bool,
+    pub service: String,
+    pub username: String,
+}
+
+// ============================================================================
+// Playlist Import API Request/Response Types
+// ============================================================================
+
+/// Request to import a playlist
+#[derive(Debug, Deserialize)]
+pub struct ImportPlaylistRequest {
+    pub playlist_id: String,
+    /// Optional override for the list name
+    pub playlist_name: Option<String>,
+}
+
+/// Response after starting a playlist import
+#[derive(Debug, Serialize)]
+pub struct ImportPlaylistResponse {
+    pub import_id: i64,
+    pub list_id: i64,
+    pub total_tracks: i32,
+    pub status: String,
+}
+
+/// Playlist import status response
+#[derive(Debug, Serialize)]
+pub struct ImportStatusResponse {
+    pub id: i64,
+    pub service: String,
+    pub playlist_name: Option<String>,
+    pub list_id: Option<i64>,
+    pub status: String,
+    pub total_tracks: i32,
+    pub imported_tracks: i32,
+    pub failed_tracks: i32,
+    pub skipped_tracks: i32,
+    pub created_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+impl From<PlaylistImport> for ImportStatusResponse {
+    fn from(import: PlaylistImport) -> Self {
+        Self {
+            id: import.id,
+            service: import.service,
+            playlist_name: import.external_playlist_name,
+            list_id: import.list_id,
+            status: import.status,
+            total_tracks: import.total_tracks,
+            imported_tracks: import.imported_tracks,
+            failed_tracks: import.failed_tracks,
+            skipped_tracks: import.skipped_tracks,
+            created_at: import.created_at,
+            completed_at: import.completed_at,
+        }
+    }
+}
+
+/// Failed track response for UI display
+#[derive(Debug, Serialize)]
+pub struct FailedTrackResponse {
+    pub id: i64,
+    pub artist_name: String,
+    pub track_name: String,
+    pub album_name: Option<String>,
+    pub failure_reason: Option<String>,
+    pub retry_count: i32,
+    pub status: String,
+}
+
+impl From<FailedImportTrack> for FailedTrackResponse {
+    fn from(track: FailedImportTrack) -> Self {
+        Self {
+            id: track.id,
+            artist_name: track.artist_name,
+            track_name: track.track_name,
+            album_name: track.album_name,
+            failure_reason: track.failure_reason,
+            retry_count: track.retry_count,
+            status: track.status,
+        }
+    }
+}
+
+/// External playlist response (from Spotify, etc.)
+#[derive(Debug, Serialize)]
+pub struct ExternalPlaylistResponse {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub owner_name: String,
+    pub track_count: i32,
+    pub image_url: Option<String>,
+    pub external_url: String,
+    pub is_public: bool,
+}
+
+/// Playlists list response with pagination
+#[derive(Debug, Serialize)]
+pub struct PlaylistsResponse {
+    pub playlists: Vec<ExternalPlaylistResponse>,
+    pub total: i32,
+    pub limit: i32,
+    pub offset: i32,
 }

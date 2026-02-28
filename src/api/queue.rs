@@ -193,3 +193,50 @@ pub async fn cancel_search(
         }
     }
 }
+
+/// Query params for search history pagination
+#[derive(Debug, Deserialize)]
+pub struct SearchHistoryQuery {
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+/// Response for search history
+#[derive(Debug, Serialize)]
+pub struct SearchHistoryResponse {
+    pub entries: Vec<crate::models::SearchHistoryEntry>,
+    pub total: i64,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+/// Get search history for all users (platform-wide)
+///
+/// GET /api/queue/history
+pub async fn get_search_history(
+    State(state): State<AppState>,
+    _user: AuthUser,
+    axum::extract::Query(query): axum::extract::Query<SearchHistoryQuery>,
+) -> Result<Json<SearchHistoryResponse>, (StatusCode, String)> {
+    let limit = query.limit.unwrap_or(50).min(100); // Max 100 per page
+    let offset = query.offset.unwrap_or(0);
+
+    let entries = state.db.get_search_history(limit, offset).await
+        .map_err(|e| {
+            tracing::error!("[Queue API] Failed to get search history: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        })?;
+
+    let total = state.db.get_search_history_count().await
+        .map_err(|e| {
+            tracing::error!("[Queue API] Failed to get search history count: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        })?;
+
+    Ok(Json(SearchHistoryResponse {
+        entries,
+        total,
+        limit,
+        offset,
+    }))
+}

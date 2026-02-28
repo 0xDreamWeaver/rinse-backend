@@ -3,6 +3,7 @@ mod auth;
 mod items;
 mod lists;
 mod metadata;
+mod oauth;
 mod queue;
 mod ws;
 
@@ -22,7 +23,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use crate::db::Database;
-use crate::services::{DownloadService, EmailService, QueueService, MetadataService};
+use crate::services::{DownloadService, EmailService, QueueService, MetadataService, OAuthService};
 
 /// Application state
 #[derive(Clone)]
@@ -31,6 +32,7 @@ pub struct AppState {
     pub download_service: Arc<DownloadService>,
     pub queue_service: Arc<QueueService>,
     pub metadata_service: Arc<MetadataService>,
+    pub oauth_service: Option<Arc<OAuthService>>,
     pub jwt_secret: String,
     pub email_service: Option<EmailService>,
     pub ws_broadcast: broadcast::Sender<WsEvent>,
@@ -73,6 +75,7 @@ pub fn create_router(state: AppState) -> Router {
         // Queue routes (auth required - AuthUser extractor handles this)
         .route("/api/queue", get(queue::get_queue_status))
         .route("/api/queue/items", get(queue::get_queue_items))
+        .route("/api/queue/history", get(queue::get_search_history))
         .route("/api/queue/search", post(queue::enqueue_search))
         .route("/api/queue/list", post(queue::enqueue_list))
         .route("/api/queue/:id", delete(queue::cancel_search))
@@ -86,6 +89,14 @@ pub fn create_router(state: AppState) -> Router {
 
         // WebSocket for download progress
         .route("/api/ws/progress", get(ws::progress_handler))
+
+        // OAuth routes (auth required - AuthUser extractor handles this)
+        .route("/api/oauth/connections", get(oauth::get_all_connection_statuses))
+        .route("/api/oauth/:service/status", get(oauth::get_connection_status))
+        .route("/api/oauth/:service/connect", get(oauth::start_oauth))
+        .route("/api/oauth/:service/callback", post(oauth::oauth_callback))
+        .route("/api/oauth/:service/disconnect", delete(oauth::disconnect_oauth))
+        .route("/api/oauth/:service/playlists", get(oauth::get_playlists))
 
         // Health check (public)
         .route("/health", get(|| async { "OK" }))

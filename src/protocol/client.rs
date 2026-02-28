@@ -24,7 +24,7 @@ use super::peer::{
     send_message, read_message, encode_string,
     download_file as peer_download_file,  // Working download implementation
 };
-use super::file_selection::{find_best_file, ScoredFile};
+use super::file_selection::{find_best_file, find_best_files, ScoredFile};
 
 /// Default port for incoming peer connections
 pub const PEER_LISTEN_PORT: u16 = 2234;
@@ -539,16 +539,16 @@ impl SoulseekClient {
     pub async fn search(&mut self, query: &str, timeout_secs: u64) -> Result<Vec<SearchResult>> {
         let token: u32 = rand::random();
 
-        tracing::info!("[SoulseekClient] === SEARCH ===");
+        tracing::info!("[SoulseekClient] === SEARCH START ===");
         tracing::info!("[SoulseekClient] Query: '{}'", query);
-        tracing::info!("[SoulseekClient] Token: {}", token);
+        tracing::info!("[SoulseekClient] Token: {}, Timeout: {}s", token, timeout_secs);
 
         // Clear previous incoming results (from listener)
         self.incoming_results.lock().await.clear();
 
         // Send search
         Self::send_search(&mut self.server_stream, token, query).await?;
-        tracing::info!("[SoulseekClient] Search sent, waiting for results...");
+        tracing::info!("[SoulseekClient] Search sent to server, waiting for ConnectToPeer messages...");
 
         // Channel for collecting results from background ConnectToPeer tasks
         let (result_tx, mut result_rx) = mpsc::channel::<(String, String, u32, TcpStream, ParsedSearchResponse)>(50);
@@ -558,6 +558,8 @@ impl SoulseekClient {
 
         let mut results: Vec<SearchResult> = Vec::new();
         let mut connect_to_peer_count = 0;
+        let mut first_connect_to_peer_time: Option<std::time::Instant> = None;
+        let mut first_result_time: Option<std::time::Instant> = None;
         let start = std::time::Instant::now();
         let timeout = Duration::from_secs(timeout_secs);
         let min_wait = Duration::from_secs(3); // Wait at least 3 seconds for results
@@ -565,24 +567,35 @@ impl SoulseekClient {
 
         // Collect results from server ConnectToPeer messages
         // Early exit: once we have enough results and no new ones for 2 seconds, return
-        let no_results_timeout = Duration::from_secs(5);
+        let no_results_timeout = Duration::from_secs(7); // Increased from 5s to give more time
 
         while start.elapsed() < timeout {
             // Early exit conditions (after minimum wait time):
             // 1. We have at least 5 results with files AND no new results for 2 seconds
             // 2. We have at least 10 results with files (good enough, return immediately)
-            // 3. After 5 seconds with ZERO results - abort early (no point waiting longer)
+            // 3. After timeout with ZERO results AND no ConnectToPeer messages received - abort
             let results_with_files = results.iter().filter(|r| !r.files.is_empty()).count();
 
-            // Check for no results after 5 seconds - abort early
-            if start.elapsed() > no_results_timeout && results_with_files == 0 {
-                tracing::info!("[Search] Early abort: no results after {:?}", start.elapsed());
-                bail!("No results found for search '{}'", query);
+            // Only abort early if we have no results AND no ConnectToPeer messages at all
+            // If we got ConnectToPeer messages but no results yet, keep waiting (connections may be slow)
+            if start.elapsed() > no_results_timeout && results_with_files == 0 && connect_to_peer_count == 0 {
+                tracing::warn!("[Search] Early abort: no ConnectToPeer messages received after {:.1}s", start.elapsed().as_secs_f32());
+                tracing::warn!("[Search] This may indicate: network issues, query didn't match indexed files, or server is slow");
+                bail!("No results found for search '{}' - no peers responded", query);
+            }
+
+            // Log progress periodically (every 2 seconds)
+            let elapsed_secs = start.elapsed().as_secs();
+            if elapsed_secs > 0 && elapsed_secs % 2 == 0 && start.elapsed().subsec_millis() < 150 {
+                tracing::debug!(
+                    "[Search] Progress: {:.1}s elapsed, {} ConnectToPeer msgs, {} results with files",
+                    start.elapsed().as_secs_f32(), connect_to_peer_count, results_with_files
+                );
             }
 
             if start.elapsed() > min_wait {
                 if results_with_files >= 10 {
-                    tracing::info!("[Search] Early exit: {} results with files", results_with_files);
+                    tracing::info!("[Search] Early exit: {} results with files (enough results)", results_with_files);
                     break;
                 }
                 if results_with_files >= 5 && last_result_time.elapsed() > Duration::from_secs(2) {
@@ -606,7 +619,12 @@ impl SoulseekClient {
                     let peer_token = buf.get_u32_le();
 
                     if conn_type == "P" && connect_to_peer_count <= 150 {
-                        tracing::info!("[Search] ConnectToPeer #{}: {} at {}:{} (token={})",
+                        // Track time to first ConnectToPeer
+                        if first_connect_to_peer_time.is_none() {
+                            first_connect_to_peer_time = Some(std::time::Instant::now());
+                            tracing::info!("[Search] First ConnectToPeer received at {:.2}s", start.elapsed().as_secs_f32());
+                        }
+                        tracing::debug!("[Search] ConnectToPeer #{}: {} at {}:{} (token={})",
                             connect_to_peer_count, peer_username, ip, port, peer_token);
 
                         // Spawn ConnectToPeer attempt in background so we don't block the search loop
@@ -629,7 +647,7 @@ impl SoulseekClient {
                                     let _ = tx.send((peer_username_clone, ip_clone, port, peer_stream, response)).await;
                                 }
                                 Err(e) => {
-                                    tracing::info!("[Search] Failed to get results from '{}': {}", peer_username_clone, e);
+                                    tracing::debug!("[Search] Failed to get results from '{}': {}", peer_username_clone, e);
                                     // Report failure for CantConnectToPeer (Nicotine+ does this)
                                     let _ = fail_tx.send((peer_token, peer_username_clone)).await;
                                 }
@@ -672,6 +690,12 @@ impl SoulseekClient {
 
             // Check for completed ConnectToPeer results (non-blocking)
             while let Ok((peer_username, ip, port, peer_stream, response)) = result_rx.try_recv() {
+                // Track time to first result
+                if first_result_time.is_none() && !response.files.is_empty() {
+                    first_result_time = Some(std::time::Instant::now());
+                    tracing::info!("[Search] First result with files at {:.2}s from '{}'",
+                        start.elapsed().as_secs_f32(), peer_username);
+                }
                 // Store peer stream for later download
                 tracing::debug!("[Search] Storing P connection for '{}' (has {} files)", peer_username, response.files.len());
                 self.peer_streams.lock().await.put(peer_username.clone(), peer_stream);
@@ -730,13 +754,29 @@ impl SoulseekClient {
             tracing::debug!("[Search] Sent {} CantConnectToPeer messages", cant_connect_count);
         }
 
-        // Final summary
+        // Final summary with timing metrics
+        let total_time = start.elapsed();
         let cached_peers = self.peer_streams.lock().await.len();
+        let total_files: usize = results.iter().map(|r| r.files.len()).sum();
+
         tracing::info!("[SoulseekClient] === SEARCH COMPLETE ===");
-        tracing::info!("[SoulseekClient] ConnectToPeer messages: {}", connect_to_peer_count);
-        tracing::info!("[SoulseekClient] Incoming connections: {}", incoming_count);
-        tracing::info!("[SoulseekClient] Total results: {} users", results.len());
-        tracing::info!("[SoulseekClient] Total files: {}", results.iter().map(|r| r.files.len()).sum::<usize>());
+        tracing::info!("[SoulseekClient] Query: '{}'", query);
+        tracing::info!("[SoulseekClient] Total time: {:.2}s", total_time.as_secs_f32());
+        if let Some(t) = first_connect_to_peer_time {
+            tracing::info!("[SoulseekClient] Time to first ConnectToPeer: {:.2}s", (t.duration_since(start)).as_secs_f32());
+        } else {
+            tracing::warn!("[SoulseekClient] No ConnectToPeer messages received!");
+        }
+        if let Some(t) = first_result_time {
+            tracing::info!("[SoulseekClient] Time to first result: {:.2}s", (t.duration_since(start)).as_secs_f32());
+        } else if connect_to_peer_count > 0 {
+            tracing::warn!("[SoulseekClient] Got {} ConnectToPeer but no successful file results!", connect_to_peer_count);
+        }
+        tracing::info!("[SoulseekClient] ConnectToPeer messages received: {}", connect_to_peer_count);
+        tracing::info!("[SoulseekClient] Connection failures (CantConnectToPeer sent): {}", cant_connect_count);
+        tracing::info!("[SoulseekClient] Successful peer connections: {} users", results.len());
+        tracing::info!("[SoulseekClient] Incoming connections (peers connected to us): {}", incoming_count);
+        tracing::info!("[SoulseekClient] Total files found: {}", total_files);
         tracing::info!("[SoulseekClient] Cached peer connections: {}", cached_peers);
 
         Ok(results)
@@ -1780,6 +1820,12 @@ impl SoulseekClient {
     /// format_filter: Optional format filter ("mp3", "flac", "m4a", "wav")
     pub fn get_best_file(results: &[SearchResult], query: &str, format_filter: Option<&str>) -> Option<ScoredFile> {
         find_best_file(results, query, format_filter)
+    }
+
+    /// Get all matching files sorted by score (best first)
+    /// Use this when you need to try multiple candidates on failure
+    pub fn get_best_files(results: &[SearchResult], query: &str, format_filter: Option<&str>) -> Vec<ScoredFile> {
+        find_best_files(results, query, format_filter)
     }
 
     /// Search and download best matching file

@@ -176,7 +176,17 @@ pub async fn download_item(
         })).into_response());
     }
 
-    let file_size = item.file_size as u64;
+    // Get actual file size from disk (not database) to avoid Content-Length mismatch
+    let file_metadata = tokio::fs::metadata(&item.file_path)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get file metadata for {}: {}", item.file_path, e);
+            (StatusCode::NOT_FOUND, Json(ErrorResponse {
+                error: "File not found on disk".to_string()
+            })).into_response()
+        })?;
+    let file_size = file_metadata.len();
+
     let content_type = mime_guess::from_path(&item.file_path)
         .first_or_octet_stream()
         .to_string();
