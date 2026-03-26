@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use anyhow::Result;
 
 use crate::db::Database;
@@ -16,7 +15,7 @@ use crate::protocol::SoulseekClient;
 /// - File deletion from disk
 pub struct DownloadService {
     db: Database,
-    slsk_client: Arc<RwLock<Option<SoulseekClient>>>,
+    slsk_client: Option<Arc<SoulseekClient>>,
     #[allow(dead_code)]
     storage_path: PathBuf,
 }
@@ -26,22 +25,24 @@ impl DownloadService {
     pub fn new(db: Database, storage_path: PathBuf) -> Self {
         Self {
             db,
-            slsk_client: Arc::new(RwLock::new(None)),
+            slsk_client: None,
             storage_path,
         }
     }
 
     /// Connect to Soulseek network
-    pub async fn connect(&self, username: &str, password: &str) -> Result<()> {
+    ///
+    /// Returns `Arc<SoulseekClient>` for sharing with other services.
+    pub async fn connect(&mut self, username: &str, password: &str) -> Result<Arc<SoulseekClient>> {
         let client = SoulseekClient::connect(username, password).await?;
-        *self.slsk_client.write().await = Some(client);
+        self.slsk_client = Some(Arc::clone(&client));
         tracing::info!("Connected to Soulseek network as {}", username);
-        Ok(())
+        Ok(client)
     }
 
-    /// Get a clone of the Soulseek client Arc (for sharing with QueueService)
-    pub fn slsk_client(&self) -> Arc<RwLock<Option<SoulseekClient>>> {
-        Arc::clone(&self.slsk_client)
+    /// Get the Soulseek client Arc (for sharing with QueueService)
+    pub fn slsk_client(&self) -> Option<Arc<SoulseekClient>> {
+        self.slsk_client.clone()
     }
 
     /// Get item by ID
@@ -76,109 +77,77 @@ impl DownloadService {
 
     /// Delete list
     pub async fn delete_list(&self, id: i64) -> Result<()> {
-        tracing::info!("[DownloadService] === DELETE LIST ===");
-        tracing::info!("[DownloadService] List ID: {}", id);
-
-        // Get list info before deletion for logging
-        if let Ok(Some(list)) = self.db.get_list(id).await {
-            tracing::info!("[DownloadService] List name: {}", list.name);
-            tracing::info!("[DownloadService] List status: {}", list.status);
-            tracing::info!("[DownloadService] List items: {}", list.total_items);
-        }
+        let list_name = self.db.get_list(id).await
+            .ok().flatten()
+            .map(|l| l.name)
+            .unwrap_or_default();
 
         let result = self.db.delete_list(id).await;
         match &result {
-            Ok(_) => tracing::info!("[DownloadService] List {} deleted successfully from database", id),
-            Err(e) => tracing::error!("[DownloadService] Failed to delete list {} from database: {}", id, e),
+            Ok(_) => tracing::info!("[DownloadService] Deleted list id={} '{}' (db: ok)", id, list_name),
+            Err(e) => tracing::error!("[DownloadService] Failed to delete list id={}: {}", id, e),
         }
         result
     }
 
     /// Delete item
     pub async fn delete_item(&self, id: i64) -> Result<()> {
-        tracing::info!("[DownloadService] === DELETE ITEM ===");
-        tracing::info!("[DownloadService] Item ID: {}", id);
+        let mut filename = String::new();
+        let mut file_result = "no_file";
 
-        // Also delete the file from disk
         if let Some(item) = self.db.get_item(id).await? {
-            tracing::info!("[DownloadService] Item filename: {}", item.filename);
-            tracing::info!("[DownloadService] Item file_path: {}", item.file_path);
-            tracing::info!("[DownloadService] Item status: {}", item.download_status);
-
-            tracing::info!("[DownloadService] Attempting to delete file from disk...");
-            match tokio::fs::remove_file(&item.file_path).await {
-                Ok(_) => tracing::info!("[DownloadService] File deleted from disk: {}", item.file_path),
-                Err(e) => tracing::warn!("[DownloadService] Failed to delete file {} from disk: {}", item.file_path, e),
-            }
-        } else {
-            tracing::warn!("[DownloadService] Item {} not found in database", id);
+            filename = item.filename.clone();
+            file_result = match tokio::fs::remove_file(&item.file_path).await {
+                Ok(_) => "ok",
+                Err(_) => "failed",
+            };
         }
 
-        tracing::info!("[DownloadService] Deleting item {} from database...", id);
+        // Clean up cached cover art
+        let _ = tokio::fs::remove_file(format!("{}/covers/{}_full.webp", self.storage_path.display(), id)).await;
+        let _ = tokio::fs::remove_file(format!("{}/covers/{}_thumb.webp", self.storage_path.display(), id)).await;
+
         let result = self.db.delete_item(id).await;
         match &result {
-            Ok(_) => tracing::info!("[DownloadService] Item {} deleted successfully from database", id),
-            Err(e) => tracing::error!("[DownloadService] Failed to delete item {} from database: {}", id, e),
+            Ok(_) => tracing::info!("[DownloadService] Deleted item id={} '{}' (file: {}, db: ok)", id, filename, file_result),
+            Err(e) => tracing::error!("[DownloadService] Failed to delete item id={}: {}", id, e),
         }
         result
     }
 
     /// Batch delete items
     pub async fn delete_items(&self, ids: Vec<i64>) -> Result<()> {
-        tracing::info!("[DownloadService] === BATCH DELETE ITEMS ===");
-        tracing::info!("[DownloadService] Item IDs: {:?}", ids);
-        tracing::info!("[DownloadService] Count: {}", ids.len());
-
-        // Delete files from disk
-        let mut files_deleted = 0;
+        let mut files_ok = 0;
         let mut files_failed = 0;
         for id in &ids {
             if let Some(item) = self.db.get_item(*id).await? {
-                tracing::info!("[DownloadService] Processing item {}: {} ({})", id, item.filename, item.file_path);
                 match tokio::fs::remove_file(&item.file_path).await {
-                    Ok(_) => {
-                        files_deleted += 1;
-                        tracing::info!("[DownloadService] Deleted file: {}", item.file_path);
-                    }
-                    Err(e) => {
-                        files_failed += 1;
-                        tracing::warn!("[DownloadService] Failed to delete file {}: {}", item.file_path, e);
-                    }
+                    Ok(_) => files_ok += 1,
+                    Err(_) => files_failed += 1,
                 }
-            } else {
-                tracing::warn!("[DownloadService] Item {} not found in database", id);
             }
+            // Clean up cached cover art
+            let _ = tokio::fs::remove_file(format!("{}/covers/{}_full.webp", self.storage_path.display(), id)).await;
+            let _ = tokio::fs::remove_file(format!("{}/covers/{}_thumb.webp", self.storage_path.display(), id)).await;
         }
-
-        tracing::info!("[DownloadService] Files deleted: {}, Files failed: {}", files_deleted, files_failed);
-        tracing::info!("[DownloadService] Deleting {} items from database...", ids.len());
 
         let result = self.db.delete_items(&ids).await;
         match &result {
-            Ok(_) => tracing::info!("[DownloadService] {} items deleted successfully from database", ids.len()),
-            Err(e) => tracing::error!("[DownloadService] Failed to delete items from database: {}", e),
+            Ok(_) => tracing::info!(
+                "[DownloadService] Batch deleted {} items (files: {} ok, {} failed; db: ok)",
+                ids.len(), files_ok, files_failed
+            ),
+            Err(e) => tracing::error!("[DownloadService] Failed to batch delete items: {}", e),
         }
         result
     }
 
     /// Batch delete lists
     pub async fn delete_lists(&self, ids: Vec<i64>) -> Result<()> {
-        tracing::info!("[DownloadService] === BATCH DELETE LISTS ===");
-        tracing::info!("[DownloadService] List IDs: {:?}", ids);
-        tracing::info!("[DownloadService] Count: {}", ids.len());
-
-        // Log each list before deletion
-        for id in &ids {
-            if let Ok(Some(list)) = self.db.get_list(*id).await {
-                tracing::info!("[DownloadService] List {}: {} (status: {}, items: {})",
-                    id, list.name, list.status, list.total_items);
-            }
-        }
-
         let result = self.db.delete_lists(&ids).await;
         match &result {
-            Ok(_) => tracing::info!("[DownloadService] {} lists deleted successfully from database", ids.len()),
-            Err(e) => tracing::error!("[DownloadService] Failed to delete lists from database: {}", e),
+            Ok(_) => tracing::info!("[DownloadService] Batch deleted {} lists (db: ok)", ids.len()),
+            Err(e) => tracing::error!("[DownloadService] Failed to batch delete lists: {}", e),
         }
         result
     }

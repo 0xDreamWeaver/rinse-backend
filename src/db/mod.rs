@@ -63,16 +63,17 @@ impl Database {
     }
 
     /// Create a user without email verification (for admin/legacy users)
-    pub async fn create_user_verified(&self, username: &str, password_hash: &str) -> Result<User> {
+    pub async fn create_user_verified(&self, username: &str, password_hash: &str, role: &str) -> Result<User> {
         let user = sqlx::query_as::<_, User>(
             r#"
-            INSERT INTO users (username, password_hash, email_verified)
-            VALUES (?, ?, 1)
+            INSERT INTO users (username, password_hash, email_verified, role)
+            VALUES (?, ?, 1, ?)
             RETURNING *
             "#
         )
         .bind(username)
         .bind(password_hash)
+        .bind(role)
         .fetch_one(&self.pool)
         .await
         .context("Failed to create user")?;
@@ -196,6 +197,131 @@ impl Database {
             .context("Failed to delete user")?;
 
         Ok(())
+    }
+
+    /// Update user profile (display_name and bio)
+    pub async fn update_user_profile(
+        &self,
+        user_id: i64,
+        display_name: Option<&str>,
+        bio: Option<&str>,
+    ) -> Result<User> {
+        let user = sqlx::query_as::<_, User>(
+            r#"
+            UPDATE users
+            SET display_name = ?, bio = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            RETURNING *
+            "#
+        )
+        .bind(display_name)
+        .bind(bio)
+        .bind(user_id)
+        .fetch_one(&self.pool)
+        .await
+        .context("Failed to update user profile")?;
+
+        Ok(user)
+    }
+
+    /// Update user avatar path (None removes it)
+    pub async fn update_user_avatar(&self, user_id: i64, avatar_path: Option<&str>) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE users
+            SET avatar_path = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            "#
+        )
+        .bind(avatar_path)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await
+        .context("Failed to update user avatar")?;
+
+        Ok(())
+    }
+
+    /// Get all users (for admin user list)
+    pub async fn get_all_users(&self) -> Result<Vec<User>> {
+        let users = sqlx::query_as::<_, User>(
+            "SELECT * FROM users ORDER BY created_at ASC"
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to get all users")?;
+
+        Ok(users)
+    }
+
+    /// Update a user's role
+    pub async fn update_user_role(&self, user_id: i64, role: &str) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE users
+            SET role = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            "#
+        )
+        .bind(role)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await
+        .context("Failed to update user role")?;
+
+        Ok(())
+    }
+
+    /// Count admin users
+    pub async fn count_admins(&self) -> Result<i64> {
+        let row = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM users WHERE role = 'admin'"
+        )
+        .fetch_one(&self.pool)
+        .await
+        .context("Failed to count admins")?;
+
+        Ok(row)
+    }
+
+    /// Get system stats for the admin dashboard (excludes soft-deleted items)
+    pub async fn get_system_stats(&self) -> Result<SystemStats> {
+        let total_items: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM items WHERE download_status != 'deleted'")
+            .fetch_one(&self.pool).await.context("Failed to count items")?;
+        let completed_items: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM items WHERE download_status = 'completed'")
+            .fetch_one(&self.pool).await.context("Failed to count completed items")?;
+        let failed_items: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM items WHERE download_status = 'failed'")
+            .fetch_one(&self.pool).await.context("Failed to count failed items")?;
+        let pending_items: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM items WHERE download_status IN ('pending', 'downloading')")
+            .fetch_one(&self.pool).await.context("Failed to count pending items")?;
+        let total_storage_bytes: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(file_size), 0) FROM items WHERE download_status = 'completed'")
+            .fetch_one(&self.pool).await.context("Failed to sum storage")?;
+        let total_lists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM lists")
+            .fetch_one(&self.pool).await.context("Failed to count lists")?;
+        let total_users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+            .fetch_one(&self.pool).await.context("Failed to count users")?;
+        let items_with_metadata: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM items WHERE metadata_fetched_at IS NOT NULL AND download_status != 'deleted'")
+            .fetch_one(&self.pool).await.context("Failed to count metadata items")?;
+        let items_without_metadata: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM items WHERE metadata_fetched_at IS NULL AND download_status = 'completed'")
+            .fetch_one(&self.pool).await.context("Failed to count items without metadata")?;
+        let items_with_cached_covers: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM items WHERE cover_cached = 1 AND download_status != 'deleted'")
+            .fetch_one(&self.pool).await.context("Failed to count cached covers")?;
+        let items_without_cached_covers: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM items WHERE cover_cached = 0 AND meta_album_art_url IS NOT NULL AND download_status = 'completed'")
+            .fetch_one(&self.pool).await.context("Failed to count uncached covers")?;
+
+        Ok(SystemStats {
+            total_items,
+            completed_items,
+            failed_items,
+            pending_items,
+            total_storage_bytes,
+            total_lists,
+            total_users,
+            items_with_metadata,
+            items_without_metadata,
+            items_with_cached_covers,
+            items_without_cached_covers,
+        })
     }
 
     // Item methods
@@ -381,6 +507,30 @@ impl Database {
         Ok(())
     }
 
+    /// Update audio properties (sample rate, bit depth) for an item
+    pub async fn update_item_audio_properties(
+        &self,
+        id: i64,
+        sample_rate: Option<i32>,
+        bit_depth: Option<i32>,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE items
+            SET sample_rate = ?, bit_depth = ?
+            WHERE id = ?
+            "#
+        )
+        .bind(sample_rate)
+        .bind(bit_depth)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .context("Failed to update item audio properties")?;
+
+        Ok(())
+    }
+
     // List methods
 
     /// Create a new list
@@ -533,6 +683,7 @@ impl Database {
             FROM list_items
             INNER JOIN items ON items.id = list_items.item_id
             WHERE list_items.list_id = ?
+              AND items.download_status != 'deleted'
             "#
         )
         .bind(list_id)
@@ -619,54 +770,64 @@ impl Database {
         Ok(item_ids)
     }
 
-    /// Delete item
-    /// Soft delete item - marks status as 'deleted' instead of removing record
-    /// This preserves the item in lists while indicating it's been removed
+    /// Delete item — removes the row from the database and cleans up list_items references
     pub async fn delete_item(&self, id: i64) -> Result<()> {
-        sqlx::query(
-            "UPDATE items SET download_status = 'deleted', download_progress = 0.0 WHERE id = ?"
-        )
+        // Remove list_items references first (foreign keys are not enforced in SQLite by default)
+        sqlx::query("DELETE FROM list_items WHERE item_id = ?")
             .bind(id)
             .execute(&self.pool)
             .await
-            .context("Failed to soft delete item")?;
+            .context("Failed to delete list_items references")?;
+
+        sqlx::query("DELETE FROM items WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .context("Failed to delete item")?;
 
         Ok(())
     }
 
-    /// Batch soft delete items
+    /// Batch delete items — removes rows from the database and cleans up list_items references
     pub async fn delete_items(&self, ids: &[i64]) -> Result<()> {
         if ids.is_empty() {
             return Ok(());
         }
 
         let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let query_str = format!(
-            "UPDATE items SET download_status = 'deleted', download_progress = 0.0 WHERE id IN ({})",
+
+        // Remove list_items references first
+        let li_query_str = format!(
+            "DELETE FROM list_items WHERE item_id IN ({})",
             placeholders
         );
+        let mut query = sqlx::query(&li_query_str);
+        for id in ids {
+            query = query.bind(id);
+        }
+        query.execute(&self.pool)
+            .await
+            .context("Failed to delete list_items references")?;
 
+        // Delete the items
+        let query_str = format!(
+            "DELETE FROM items WHERE id IN ({})",
+            placeholders
+        );
         let mut query = sqlx::query(&query_str);
         for id in ids {
             query = query.bind(id);
         }
-
         query.execute(&self.pool)
             .await
-            .context("Failed to batch soft delete items")?;
+            .context("Failed to batch delete items")?;
 
         Ok(())
     }
 
-    /// Hard delete item (permanently remove from database)
+    /// Hard delete item (alias kept for callers that explicitly want hard delete)
     pub async fn hard_delete_item(&self, id: i64) -> Result<()> {
-        sqlx::query("DELETE FROM items WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .context("Failed to hard delete item")?;
-
-        Ok(())
+        self.delete_item(id).await
     }
 
     /// Batch delete lists
@@ -738,13 +899,13 @@ impl Database {
     pub async fn enqueue_searches_for_list(
         &self,
         user_id: i64,
-        tracks: &[(String, Option<String>, Option<String>)], // (query, artist, track)
+        tracks: &[(String, Option<String>, Option<String>, Option<String>)], // (query, artist, track, client_id)
         format: Option<&str>,
         list_id: i64,
     ) -> Result<Vec<QueuedSearch>> {
         let mut results = Vec::with_capacity(tracks.len());
 
-        for (position, (query, artist, track)) in tracks.iter().enumerate() {
+        for (position, (query, artist, track, client_id)) in tracks.iter().enumerate() {
             let queued = self.enqueue_search(
                 user_id,
                 query,
@@ -753,7 +914,7 @@ impl Database {
                 format,
                 Some(list_id),
                 Some(position as i32),
-                None, // List searches don't need individual client IDs
+                client_id.as_deref(),
             ).await?;
             results.push(queued);
         }
@@ -777,6 +938,63 @@ impl Database {
         .context("Failed to get next pending search")?;
 
         Ok(queued)
+    }
+
+    /// Atomically claim the next pending search by marking it as 'processing'
+    /// in a single transaction. Returns the claimed search, or None if no
+    /// pending searches exist. This prevents TOCTOU races when multiple
+    /// concurrent workers poll for work.
+    pub async fn claim_next_pending_search(&self) -> Result<Option<QueuedSearch>> {
+        // Use a transaction to SELECT + UPDATE atomically
+        let mut tx = self.pool.begin().await
+            .context("Failed to begin transaction for claim_next_pending_search")?;
+
+        // Find the next pending search and lock the row
+        let candidate = sqlx::query_as::<_, QueuedSearch>(
+            r#"
+            SELECT * FROM search_queue
+            WHERE status IN ('pending', 'retry')
+            ORDER BY created_at ASC
+            LIMIT 1
+            "#
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .context("Failed to find next pending search")?;
+
+        let queued = match candidate {
+            Some(q) => q,
+            None => {
+                tx.commit().await?;
+                return Ok(None);
+            }
+        };
+
+        // Mark it as processing within the same transaction
+        let result = sqlx::query(
+            r#"
+            UPDATE search_queue
+            SET status = 'processing', started_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND status IN ('pending', 'retry')
+            "#
+        )
+        .bind(queued.id)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to mark search as processing in claim")?;
+
+        if result.rows_affected() == 0 {
+            // Another worker somehow claimed it (shouldn't happen in a transaction, but be safe)
+            tx.commit().await?;
+            return Ok(None);
+        }
+
+        tx.commit().await?;
+
+        // Return the search with updated status
+        let mut claimed = queued;
+        claimed.status = "processing".to_string();
+        Ok(Some(claimed))
     }
 
     /// Mark a search as processing (sets started_at)
@@ -1055,7 +1273,7 @@ impl Database {
         Ok(result.rows_affected())
     }
 
-    /// Mark any 'downloading' items as failed (for restart recovery)
+    /// Mark any 'downloading' or 'queued' items as failed (for restart recovery)
     /// Returns the number of items marked as failed
     pub async fn mark_interrupted_downloads(&self) -> Result<u64> {
         let result = sqlx::query(
@@ -1063,7 +1281,7 @@ impl Database {
             UPDATE items
             SET download_status = 'failed',
                 error_message = 'Download interrupted by server restart'
-            WHERE download_status = 'downloading'
+            WHERE download_status IN ('downloading', 'queued')
             "#
         )
         .execute(&self.pool)
@@ -1071,6 +1289,36 @@ impl Database {
         .context("Failed to mark interrupted downloads")?;
 
         Ok(result.rows_affected())
+    }
+
+    /// Count pending/processing/retry searches for a specific list
+    /// Used to determine if a list still has in-flight work
+    pub async fn count_pending_searches_for_list(&self, list_id: i64) -> Result<i64> {
+        let row = sqlx::query(
+            r#"
+            SELECT COUNT(*) as count FROM search_queue
+            WHERE list_id = ? AND status IN ('pending', 'processing', 'retry')
+            "#
+        )
+        .bind(list_id)
+        .fetch_one(&self.pool)
+        .await
+        .context("Failed to count pending searches for list")?;
+
+        Ok(row.get::<i64, _>("count"))
+    }
+
+    /// Get all lists with a given status
+    pub async fn get_lists_by_status(&self, status: &str) -> Result<Vec<List>> {
+        let lists = sqlx::query_as::<_, List>(
+            "SELECT * FROM lists WHERE status = ?"
+        )
+        .bind(status)
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to get lists by status")?;
+
+        Ok(lists)
     }
 
     /// Get a queued search by ID
@@ -1208,6 +1456,34 @@ impl Database {
         .await
         .context("Failed to get items without metadata")?;
 
+        Ok(items)
+    }
+
+    /// Set the cover_cached flag for an item
+    pub async fn set_cover_cached(&self, item_id: i64, cached: bool) -> Result<()> {
+        sqlx::query("UPDATE items SET cover_cached = ? WHERE id = ?")
+            .bind(cached as i32)
+            .bind(item_id)
+            .execute(&self.pool)
+            .await
+            .context("Failed to set cover_cached")?;
+        Ok(())
+    }
+
+    /// Get items that have an album art URL but haven't been cached yet
+    pub async fn get_items_with_uncached_covers(&self) -> Result<Vec<Item>> {
+        let items = sqlx::query_as::<_, Item>(
+            r#"
+            SELECT * FROM items
+            WHERE meta_album_art_url IS NOT NULL
+              AND cover_cached = 0
+              AND download_status = 'completed'
+            ORDER BY completed_at DESC
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to get items with uncached covers")?;
         Ok(items)
     }
 
@@ -1458,7 +1734,7 @@ impl Database {
         Ok(conn)
     }
 
-    /// Update OAuth tokens (after refresh)
+    /// Update OAuth tokens (after refresh), optionally updating the username
     pub async fn update_oauth_tokens(
         &self,
         user_id: i64,
@@ -1466,6 +1742,7 @@ impl Database {
         access_token_encrypted: &str,
         refresh_token_encrypted: Option<&str>,
         token_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+        external_username: Option<&str>,
     ) -> Result<()> {
         sqlx::query(
             r#"
@@ -1473,6 +1750,7 @@ impl Database {
             SET access_token_encrypted = ?,
                 refresh_token_encrypted = COALESCE(?, refresh_token_encrypted),
                 token_expires_at = ?,
+                external_username = COALESCE(?, external_username),
                 updated_at = CURRENT_TIMESTAMP,
                 last_used_at = CURRENT_TIMESTAMP
             WHERE user_id = ? AND service = ?
@@ -1481,6 +1759,7 @@ impl Database {
         .bind(access_token_encrypted)
         .bind(refresh_token_encrypted)
         .bind(token_expires_at)
+        .bind(external_username)
         .bind(user_id)
         .bind(service)
         .execute(&self.pool)

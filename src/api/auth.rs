@@ -31,7 +31,14 @@ use crate::models::{
 pub struct Claims {
     pub sub: i64,  // user id
     pub username: String,
+    /// User role (admin, user, viewer). Defaults to "user" for tokens issued before roles existed.
+    #[serde(default = "default_role")]
+    pub role: String,
     pub exp: usize,
+}
+
+fn default_role() -> String {
+    "user".to_string()
 }
 
 /// Authenticated user extracted from JWT
@@ -39,6 +46,7 @@ pub struct Claims {
 pub struct AuthUser {
     pub id: i64,
     pub username: String,
+    pub role: String,
 }
 
 /// Error response
@@ -74,6 +82,7 @@ impl FromRequestParts<AppState> for AuthUser {
         Ok(AuthUser {
             id: claims.sub,
             username: claims.username,
+            role: claims.role,
         })
     }
 }
@@ -130,6 +139,7 @@ pub async fn login(
     let claims = Claims {
         sub: user.id,
         username: user.username.clone(),
+        role: user.role.clone(),
         exp: expiration as usize,
     };
 
@@ -151,6 +161,10 @@ pub async fn login(
             username: user.username,
             email: user.email.unwrap_or_default(),
             email_verified: user.email_verified,
+            display_name: user.display_name,
+            bio: user.bio,
+            has_avatar: user.avatar_path.is_some(),
+            role: user.role,
             created_at: user.created_at,
         }
     }))
@@ -398,8 +412,23 @@ pub async fn me(
         username: user.username,
         email: user.email.unwrap_or_default(),
         email_verified: user.email_verified,
+        display_name: user.display_name,
+        bio: user.bio,
+        has_avatar: user.avatar_path.is_some(),
+        role: user.role,
         created_at: user.created_at,
     }))
+}
+
+/// Check if the authenticated user is an admin, returning a 403 error if not
+pub fn require_admin(auth: &AuthUser) -> Result<(), Response> {
+    if auth.role != "admin" {
+        Err((StatusCode::FORBIDDEN, Json(ErrorResponse {
+            error: "Admin access required".to_string(),
+        })).into_response())
+    } else {
+        Ok(())
+    }
 }
 
 /// Verify JWT token and extract claims

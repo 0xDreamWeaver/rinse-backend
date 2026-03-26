@@ -5,8 +5,9 @@
 //! - File transfer connection management
 //! - Both direct and indirect file transfer paths
 
-use anyhow::{Result, bail};
+use anyhow::{Result, bail, Context};
 use bytes::{Buf, BufMut, BytesMut};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -185,12 +186,13 @@ pub async fn handle_incoming_connection(
 ) -> Result<IncomingConnection> {
     // Read first 4 bytes to determine if it's PeerInit (length-prefixed) or PierceFirewall
     let first_u32 = stream.read_u32_le().await?;
+    tracing::info!("[CONN] Incoming handshake: first_u32={} (0x{:08x})", first_u32, first_u32);
 
     if first_u32 == 5 {
         // PierceFirewall: [length=5][type=0][token]
         let _msg_type = stream.read_u8().await?;
         let token = stream.read_u32_le().await?;
-        tracing::debug!("[CONN] Received PierceFirewall, token={}", token);
+        tracing::info!("[CONN] Received PierceFirewall, token={}", token);
 
         // Respond with PeerInit type F (assume file transfer for PierceFirewall)
         send_peer_init(&mut stream, our_username, "F", 0).await?;
@@ -216,7 +218,7 @@ pub async fn handle_incoming_connection(
             let conn_type = decode_string(&mut buf)?;
             let init_token = buf.get_u32_le();
 
-            tracing::debug!("[CONN] Received PeerInit from '{}', type='{}', token={}", peer_username, conn_type, init_token);
+            tracing::info!("[CONN] Received PeerInit from '{}', type='{}', token={}", peer_username, conn_type, init_token);
 
             if conn_type == "F" {
                 // File transfer connection - uploader is connecting to us
@@ -244,7 +246,7 @@ pub async fn handle_incoming_connection(
         }
     } else {
         // Might be raw FileTransferInit (4-byte token) if handshake already done
-        tracing::debug!("[CONN] Received raw token: {}", first_u32);
+        tracing::info!("[CONN] Received raw token (assumed FileTransferInit): {}", first_u32);
         Ok(IncomingConnection::File(FileConnection { stream, transfer_token: first_u32 }))
     }
 }
@@ -463,6 +465,41 @@ pub async fn receive_search_results_from_peer(
     }
 
     bail!("No FileSearchResponse received from peer")
+}
+
+/// Connect to a peer via PierceFirewall and return the raw stream.
+///
+/// This is the general-purpose outbound peer connection function used when
+/// responding to a ConnectToPeer "P" message from the server. After connecting,
+/// the caller should read the first peer message and dispatch appropriately
+/// (search results, GetSharedFileList, QueueUpload, etc.).
+pub async fn connect_to_peer_for_dispatch(
+    ip: &str,
+    port: u32,
+    peer_username: &str,
+    peer_token: u32,
+) -> Result<TcpStream> {
+    let addr = format!("{}:{}", ip, port);
+    tracing::debug!("[ConnectToPeer] Connecting to '{}' at {} (token={})", peer_username, addr, peer_token);
+
+    let mut peer_stream = match tokio::time::timeout(
+        Duration::from_secs(5),
+        TcpStream::connect(&addr)
+    ).await {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(e)) => bail!("TCP connect to '{}' failed: {}", peer_username, e),
+        Err(_) => bail!("TCP connect to '{}' timed out (peer unreachable)", peer_username),
+    };
+
+    peer_stream.set_nodelay(true)?;
+
+    // Send PierceFirewall to identify ourselves
+    if let Err(e) = send_pierce_firewall(&mut peer_stream, peer_token).await {
+        bail!("Failed to send PierceFirewall to '{}': {}", peer_username, e);
+    }
+
+    tracing::debug!("[ConnectToPeer] Connected to '{}' at {}, PierceFirewall sent (token={})", peer_username, addr, peer_token);
+    Ok(peer_stream)
 }
 
 /// Connect to peer for search results
@@ -718,8 +755,6 @@ pub async fn wait_for_transfer_request(
             peer_stream.write_all(&reply_data).await?;
             peer_stream.flush().await?;
 
-            tracing::info!("[TRANSFER] Sent TransferReply (allowed) for token {}", transfer_token);
-
             return Ok(NegotiationResult::Allowed { filesize, transfer_token });
         } else if code == 44 {
             // PlaceInQueueReply - tells us our position in queue
@@ -889,15 +924,17 @@ pub async fn receive_file_data(
     filesize: u64,
     output_path: std::path::PathBuf,
     progress_callback: Option<ArcProgressCallback>,
+    peer_username: &str,
 ) -> Result<u64> {
-    tracing::info!("[DOWNLOAD] Starting file receive for {:?}", output_path);
-    tracing::info!("[DOWNLOAD] Expected size: {:.2} MB", filesize as f64 / 1_048_576.0);
+    let size_mb = filesize as f64 / 1_048_576.0;
+    let basename = output_path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+    tracing::info!("[DOWNLOAD] Starting receive: {:.2} MB -> \"{}\" from '{}'", size_mb, basename, peer_username);
 
     // Send FileOffset (8 bytes, NO length prefix)
-    tracing::info!("[DOWNLOAD] Sending FileOffset (0)...");
     file_conn.stream.write_u64_le(0).await?;
     file_conn.stream.flush().await?;
-    tracing::info!("[DOWNLOAD] FileOffset sent!");
 
     // Create parent directories if needed
     if let Some(parent) = output_path.parent() {
@@ -909,11 +946,12 @@ pub async fn receive_file_data(
     let mut total_bytes = 0u64;
     let mut buffer = vec![0u8; 65536];
     let start_time = std::time::Instant::now();
+    let mut next_log_pct: u64 = 25;
 
     loop {
         match tokio::time::timeout(Duration::from_secs(30), file_conn.stream.read(&mut buffer)).await {
             Ok(Ok(0)) => {
-                tracing::warn!("[DOWNLOAD] Connection closed by peer - total received: {} bytes", total_bytes);
+                tracing::warn!("[DOWNLOAD] Connection closed by peer - received: {} bytes", total_bytes);
                 break;
             }
             Ok(Ok(n)) => {
@@ -923,25 +961,31 @@ pub async fn receive_file_data(
                 let elapsed = start_time.elapsed().as_secs_f64();
                 let speed = if elapsed > 0.0 { total_bytes as f64 / elapsed / 1024.0 } else { 0.0 };
 
-                // Progress update every 256KB
+                // Progress callback every 256KB (for frontend)
                 if total_bytes % (256 * 1024) < 65536 {
                     if let Some(ref callback) = progress_callback {
                         callback(total_bytes, filesize, speed);
                     }
                 }
 
-                // Log every MB
-                if total_bytes % (1024 * 1024) < 65536 {
-                    tracing::info!("[DOWNLOAD] Progress: {:.2} / {:.2} MB ({:.1}%) - {:.1} KB/s",
-                        total_bytes as f64 / 1_048_576.0,
-                        filesize as f64 / 1_048_576.0,
-                        (total_bytes as f64 / filesize as f64) * 100.0,
-                        speed);
+                // Log at 25% intervals
+                if filesize > 0 {
+                    let pct = (total_bytes as f64 / filesize as f64 * 100.0) as u64;
+                    if pct >= next_log_pct && next_log_pct <= 75 {
+                        tracing::info!("[DOWNLOAD] Progress: {}% ({:.2} / {:.2} MB) - {:.1} KB/s [\"{}\" from '{}']",
+                            next_log_pct, total_bytes as f64 / 1_048_576.0, size_mb, speed, basename, peer_username);
+                        next_log_pct += 25;
+                    }
                 }
 
                 // Check if download complete
                 if total_bytes >= filesize {
-                    tracing::info!("[DOWNLOAD] Download complete!");
+                    let elapsed = start_time.elapsed();
+                    let avg_speed = if elapsed.as_secs_f64() > 0.0 {
+                        total_bytes as f64 / elapsed.as_secs_f64() / 1024.0
+                    } else { 0.0 };
+                    tracing::info!("[DOWNLOAD] Complete: {:.2} MB in {:.1}s ({:.1} KB/s avg) -> \"{}\" from '{}'",
+                        total_bytes as f64 / 1_048_576.0, elapsed.as_secs_f64(), avg_speed, basename, peer_username);
                     if let Some(ref callback) = progress_callback {
                         callback(total_bytes, filesize, speed);
                     }
@@ -963,9 +1007,137 @@ pub async fn receive_file_data(
     drop(file);
     drop(file_conn.stream);
 
-    tracing::info!("[DOWNLOAD] Saved {} bytes to {:?}", total_bytes, output_path);
-
     Ok(total_bytes)
+}
+
+/// Send file data over an established F connection (upload).
+/// Mirror of `receive_file_data` - used when we are the uploader.
+///
+/// # Arguments
+/// - file_conn: The established F connection
+/// - file_path: Path to the file to send
+/// - file_size: Total file size
+/// - throttle: Optional bandwidth throttle
+/// - progress_callback: Optional callback for progress updates
+/// - peer_username: Username of the receiving peer (for logging)
+///
+/// # Returns
+/// The number of bytes sent
+pub async fn send_file_data(
+    mut file_conn: FileConnection,
+    file_path: std::path::PathBuf,
+    file_size: u64,
+    throttle: Option<Arc<crate::services::upload::TokenBucket>>,
+    progress_callback: Option<ArcProgressCallback>,
+    peer_username: &str,
+) -> Result<u64> {
+    let size_mb = file_size as f64 / 1_048_576.0;
+    let basename = file_path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+    tracing::info!("[UPLOAD] Starting send: {:.2} MB \"{}\" to '{}'", size_mb, basename, peer_username);
+
+    // Read FileOffset from peer (8 bytes, NO length prefix)
+    let offset = match tokio::time::timeout(Duration::from_secs(30), file_conn.stream.read_u64_le()).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => bail!("Failed to read FileOffset from peer: {}", e),
+        Err(_) => bail!("Timeout waiting for FileOffset from peer"),
+    };
+
+    tracing::debug!("[UPLOAD] Peer requested offset: {} bytes", offset);
+
+    // Open file and seek to offset
+    let mut file = tokio::fs::File::open(&file_path).await
+        .context("Failed to open file for upload")?;
+
+    if offset > 0 {
+        use tokio::io::AsyncSeekExt;
+        file.seek(std::io::SeekFrom::Start(offset)).await
+            .context("Failed to seek to offset")?;
+    }
+
+    let mut total_bytes = offset;
+    let mut buffer = vec![0u8; 65536]; // 64KB chunks
+    let start_time = std::time::Instant::now();
+    let mut next_log_pct: u64 = 25;
+
+    loop {
+        let n = match tokio::time::timeout(Duration::from_secs(30), tokio::io::AsyncReadExt::read(&mut file, &mut buffer)).await {
+            Ok(Ok(0)) => break, // EOF
+            Ok(Ok(n)) => n,
+            Ok(Err(e)) => {
+                tracing::warn!("[UPLOAD] File read error: {}", e);
+                break;
+            }
+            Err(_) => {
+                tracing::warn!("[UPLOAD] File read timeout");
+                break;
+            }
+        };
+
+        // Apply bandwidth throttle
+        if let Some(ref throttle) = throttle {
+            throttle.consume(n as u64).await;
+        }
+
+        // Write to peer
+        match tokio::time::timeout(Duration::from_secs(30), file_conn.stream.write_all(&buffer[..n])).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!("[UPLOAD] Write error to '{}': {}", peer_username, e);
+                break;
+            }
+            Err(_) => {
+                tracing::warn!("[UPLOAD] Write timeout to '{}'", peer_username);
+                break;
+            }
+        }
+
+        total_bytes += n as u64;
+
+        let elapsed = start_time.elapsed().as_secs_f64();
+        let speed = if elapsed > 0.0 { (total_bytes - offset) as f64 / elapsed / 1024.0 } else { 0.0 };
+
+        // Progress callback every 256KB
+        if total_bytes % (256 * 1024) < 65536 {
+            if let Some(ref callback) = progress_callback {
+                callback(total_bytes, file_size, speed);
+            }
+        }
+
+        // Log at 25% intervals
+        if file_size > 0 {
+            let pct = (total_bytes as f64 / file_size as f64 * 100.0) as u64;
+            if pct >= next_log_pct && next_log_pct <= 75 {
+                tracing::info!("[UPLOAD] Progress: {}% ({:.2} / {:.2} MB) - {:.1} KB/s [\"{}\" to '{}']",
+                    next_log_pct, total_bytes as f64 / 1_048_576.0, size_mb, speed, basename, peer_username);
+                next_log_pct += 25;
+            }
+        }
+
+        // Check if upload complete
+        if total_bytes >= file_size {
+            break;
+        }
+    }
+
+    let _ = file_conn.stream.flush().await;
+
+    let elapsed = start_time.elapsed();
+    let bytes_sent = total_bytes - offset;
+    let avg_speed = if elapsed.as_secs_f64() > 0.0 {
+        bytes_sent as f64 / elapsed.as_secs_f64() / 1024.0
+    } else { 0.0 };
+
+    tracing::info!("[UPLOAD] Complete: {:.2} MB in {:.1}s ({:.1} KB/s avg) -> \"{}\" to '{}'",
+        bytes_sent as f64 / 1_048_576.0, elapsed.as_secs_f64(), avg_speed, basename, peer_username);
+
+    // Final progress callback
+    if let Some(ref callback) = progress_callback {
+        callback(total_bytes, file_size, avg_speed);
+    }
+
+    Ok(bytes_sent)
 }
 
 /// Wait for a file connection (F connection) from a peer.
@@ -981,8 +1153,7 @@ pub async fn wait_for_file_connection(
     file_conn_rx: &mut tokio::sync::mpsc::Receiver<FileConnection>,
     timeout_secs: u64,
 ) -> Result<FileConnection> {
-    tracing::info!("[F-CONN] === WAITING FOR F CONNECTION ===");
-    tracing::info!("[F-CONN] Peer: '{}', Token: {}, Timeout: {}s", peer_username, transfer_token, timeout_secs);
+    tracing::info!("[F-CONN] Waiting for peer '{}' (token={}, timeout={}s)", peer_username, transfer_token, timeout_secs);
 
     let file_conn = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
         let mut loop_count = 0;
@@ -997,12 +1168,10 @@ pub async fn wait_for_file_connection(
                 // Check for direct connection via our listener (PREFERRED)
                 conn = file_conn_rx.recv() => {
                     if let Some(conn) = conn {
-                        tracing::info!("[F-CONN] Got F connection from channel with token {} (expected {})", conn.transfer_token, transfer_token);
                         if conn.transfer_token == transfer_token {
-                            tracing::info!("[F-CONN] Token MATCHES! Returning connection.");
                             return Ok::<FileConnection, anyhow::Error>(conn);
                         } else {
-                            tracing::debug!("[F-CONN] Token MISMATCH: expected {}, got {} - ignoring", transfer_token, conn.transfer_token);
+                            tracing::debug!("[F-CONN] Token mismatch: expected {}, got {} - ignoring", transfer_token, conn.transfer_token);
                         }
                     } else {
                         tracing::debug!("[F-CONN] file_conn_rx.recv() returned None");
@@ -1025,11 +1194,10 @@ pub async fn wait_for_file_connection(
                                 username, conn_type, ip, port, indirect_token);
 
                             if conn_type == "F" && username == peer_username {
-                                tracing::info!("[F-CONN] ConnectToPeer F matches peer '{}' - connecting to {}:{}", peer_username, ip, port);
+                                tracing::debug!("[F-CONN] ConnectToPeer F for '{}' - connecting to {}:{}", peer_username, ip, port);
                                 // Try indirect connection IMMEDIATELY, not after timeout
                                 match connect_for_indirect_transfer(&ip, port, indirect_token, our_username).await {
                                     Ok(conn) => {
-                                        tracing::info!("[F-CONN] Indirect connection SUCCESS! Returning connection.");
                                         return Ok(conn);
                                     }
                                     Err(e) => {
@@ -1055,15 +1223,15 @@ pub async fn wait_for_file_connection(
 
     match file_conn {
         Ok(Ok(conn)) => {
-            tracing::info!("[F-CONN] === F CONNECTION ESTABLISHED === token={}", conn.transfer_token);
+            tracing::info!("[F-CONN] Established (token={})", conn.transfer_token);
             Ok(conn)
         }
         Ok(Err(e)) => {
-            tracing::error!("[F-CONN] === F CONNECTION ERROR === {}", e);
+            tracing::error!("[F-CONN] Error: {}", e);
             bail!("F connection error: {}", e)
         }
         Err(_) => {
-            tracing::error!("[F-CONN] === F CONNECTION TIMEOUT === ({}s elapsed)", timeout_secs);
+            tracing::error!("[F-CONN] Timeout ({}s elapsed)", timeout_secs);
             bail!("Timeout waiting for file connection")
         }
     }
@@ -1082,16 +1250,8 @@ pub async fn download_file(
     output_path: &std::path::Path,
     progress_callback: Option<ProgressCallback>,
 ) -> Result<u64> {
-    tracing::info!("[DOWNLOAD] Starting download from '{}'", peer_username);
-    tracing::info!("[DOWNLOAD] File: {}", filename);
-    tracing::info!("[DOWNLOAD] Size: {:.2} MB", filesize as f64 / 1_048_576.0);
-    tracing::info!("[DOWNLOAD] Transfer token: {}", transfer_token);
-
-    // Now we need to wait for EITHER:
-    // 1. Direct connection from uploader on our listener (via file_conn_rx)
-    // 2. ConnectToPeer type="F" from server (indirect)
-
-    tracing::debug!("[DOWNLOAD] Waiting for file connection (direct or indirect)...");
+    let size_mb = filesize as f64 / 1_048_576.0;
+    tracing::info!("[DOWNLOAD] Starting: '{}' from '{}' ({:.2} MB, token={})", filename, peer_username, size_mb, transfer_token);
 
     // Wait for file connection - either direct (peer connects to us) or indirect (server-brokered)
     let file_conn = tokio::time::timeout(Duration::from_secs(30), async {
@@ -1103,12 +1263,10 @@ pub async fn download_file(
                 // Check for direct connection via our listener (PREFERRED)
                 conn = file_conn_rx.recv() => {
                     if let Some(conn) = conn {
-                        tracing::info!("[DOWNLOAD] Got F connection from channel with token {}", conn.transfer_token);
                         if conn.transfer_token == transfer_token {
-                            tracing::info!("[DOWNLOAD] Token matches! Returning connection immediately.");
                             return Ok::<FileConnection, anyhow::Error>(conn);
                         } else {
-                            tracing::warn!("[DOWNLOAD] Token mismatch: expected {}, got {} - discarding", transfer_token, conn.transfer_token);
+                            tracing::debug!("[DOWNLOAD] Token mismatch: expected {}, got {} - ignoring", transfer_token, conn.transfer_token);
                         }
                     }
                 }
@@ -1126,11 +1284,10 @@ pub async fn download_file(
                             let indirect_token = buf.get_u32_le();
 
                             if conn_type == "F" && username == peer_username {
-                                tracing::info!("[DOWNLOAD] Got ConnectToPeer F from server - connecting immediately to {}:{}", ip, port);
+                                tracing::debug!("[DOWNLOAD] ConnectToPeer F for '{}' - connecting to {}:{}", peer_username, ip, port);
                                 // Try indirect connection IMMEDIATELY
                                 match connect_for_indirect_transfer(&ip, port, indirect_token, our_username).await {
                                     Ok(conn) => {
-                                        tracing::info!("[DOWNLOAD] Indirect connection successful!");
                                         return Ok(conn);
                                     }
                                     Err(e) => {
@@ -1153,10 +1310,7 @@ pub async fn download_file(
 
     // Handle file connection result
     let file_conn: Result<FileConnection, anyhow::Error> = match file_conn {
-        Ok(Ok(conn)) => {
-            tracing::info!("[DOWNLOAD] Got file connection (token={})", conn.transfer_token);
-            Ok(conn)
-        }
+        Ok(Ok(conn)) => Ok(conn),
         Ok(Err(e)) => {
             tracing::warn!("[DOWNLOAD] File connection error: {}", e);
             bail!("File connection error: {}", e)
@@ -1167,16 +1321,10 @@ pub async fn download_file(
     };
 
     let mut file_conn = file_conn?;
-    tracing::info!("[DOWNLOAD] Have file connection, sending FileOffset...");
 
     // Send FileOffset (8 bytes, NO length prefix)
-    tracing::info!("[DOWNLOAD] Sending FileOffset (0)...");
     file_conn.stream.write_u64_le(0).await?;
     file_conn.stream.flush().await?;
-    tracing::info!("[DOWNLOAD] FileOffset sent and flushed!");
-
-    // Receive file data
-    tracing::info!("[DOWNLOAD] Waiting for file data...");
 
     // Create parent directories if needed
     if let Some(parent) = output_path.parent() {
@@ -1184,16 +1332,19 @@ pub async fn download_file(
     }
 
     let mut file = tokio::fs::File::create(output_path).await?;
+    let dl_basename = output_path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
 
     let mut total_bytes = 0u64;
     let mut buffer = vec![0u8; 65536];
     let start_time = std::time::Instant::now();
+    let mut next_log_pct: u64 = 25;
 
-    tracing::info!("[DOWNLOAD] Starting data receive loop...");
     loop {
         match tokio::time::timeout(Duration::from_secs(30), file_conn.stream.read(&mut buffer)).await {
             Ok(Ok(0)) => {
-                tracing::warn!("[DOWNLOAD] Connection closed by peer (got 0 bytes) - total received: {} bytes", total_bytes);
+                tracing::warn!("[DOWNLOAD] Connection closed by peer - received: {} bytes", total_bytes);
                 break;
             }
             Ok(Ok(n)) => {
@@ -1203,26 +1354,31 @@ pub async fn download_file(
                 let elapsed = start_time.elapsed().as_secs_f64();
                 let speed = if elapsed > 0.0 { total_bytes as f64 / elapsed / 1024.0 } else { 0.0 };
 
-                // Progress update every MB (log) or every 256KB (callback)
+                // Progress callback every 256KB (for frontend)
                 if total_bytes % (256 * 1024) < 65536 {
-                    // Call progress callback if provided
                     if let Some(ref callback) = progress_callback {
                         callback(total_bytes, filesize, speed);
                     }
                 }
 
-                if total_bytes % (1024 * 1024) < 65536 {
-                    tracing::info!("[DOWNLOAD] Progress: {:.2} / {:.2} MB ({:.1}%) - {:.1} KB/s",
-                        total_bytes as f64 / 1_048_576.0,
-                        filesize as f64 / 1_048_576.0,
-                        (total_bytes as f64 / filesize as f64) * 100.0,
-                        speed);
+                // Log at 25% intervals
+                if filesize > 0 {
+                    let pct = (total_bytes as f64 / filesize as f64 * 100.0) as u64;
+                    if pct >= next_log_pct && next_log_pct <= 75 {
+                        tracing::info!("[DOWNLOAD] Progress: {}% ({:.2} / {:.2} MB) - {:.1} KB/s [\"{}\" from '{}']",
+                            next_log_pct, total_bytes as f64 / 1_048_576.0, size_mb, speed, dl_basename, peer_username);
+                        next_log_pct += 25;
+                    }
                 }
 
                 // Check if download complete
                 if total_bytes >= filesize {
-                    tracing::info!("[DOWNLOAD] Download complete!");
-                    // Final progress callback
+                    let elapsed = start_time.elapsed();
+                    let avg_speed = if elapsed.as_secs_f64() > 0.0 {
+                        total_bytes as f64 / elapsed.as_secs_f64() / 1024.0
+                    } else { 0.0 };
+                    tracing::info!("[DOWNLOAD] Complete: {:.2} MB in {:.1}s ({:.1} KB/s avg) -> \"{}\" from '{}'",
+                        total_bytes as f64 / 1_048_576.0, elapsed.as_secs_f64(), avg_speed, dl_basename, peer_username);
                     if let Some(ref callback) = progress_callback {
                         callback(total_bytes, filesize, speed);
                     }
@@ -1245,8 +1401,6 @@ pub async fn download_file(
 
     // Close the connection (signals completion to uploader)
     drop(file_conn.stream);
-
-    tracing::info!("[DOWNLOAD] Saved {} bytes to {:?}", total_bytes, output_path);
 
     Ok(total_bytes)
 }

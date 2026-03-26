@@ -5,6 +5,7 @@ pub mod codec;
 pub mod obfuscation;
 pub mod file_selection;
 pub mod peer;
+pub mod router;
 
 pub use client::{
     SoulseekClient, SearchResult, DownloadProgress, DownloadStatus, DownloadResult,

@@ -397,6 +397,15 @@ impl OAuthService {
             None => Some(encryption::encrypt_token(&refresh_token, &self.encryption_key)?), // Keep old refresh token
         };
 
+        // Refresh user profile to keep display name up to date
+        let display_name = match provider.get_user_profile(&tokens.access_token).await {
+            Ok(profile) => Some(profile.username),
+            Err(e) => {
+                tracing::debug!("[OAuth] Failed to refresh profile during token refresh: {}", e);
+                None
+            }
+        };
+
         // Update connection
         self.db
             .update_oauth_tokens(
@@ -405,6 +414,7 @@ impl OAuthService {
                 &access_token_encrypted,
                 refresh_token_encrypted.as_deref(),
                 tokens.expires_at,
+                display_name.as_deref(),
             )
             .await?;
 

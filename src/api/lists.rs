@@ -76,21 +76,14 @@ pub async fn delete_list(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, Response> {
-    tracing::info!("=== DELETE LIST REQUEST ===");
-    tracing::info!("List ID: {}", id);
-
     state.download_service.delete_list(id)
         .await
         .map_err(|e| {
-            tracing::error!("=== DELETE LIST FAILED ===");
-            tracing::error!("List ID: {} - Error: {}", id, e);
+            tracing::error!("[API] Failed to delete list id={}: {}", id, e);
             (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
                 error: "Failed to delete list".to_string()
             })).into_response()
         })?;
-
-    tracing::info!("=== DELETE LIST SUCCESS ===");
-    tracing::info!("Deleted list ID: {}", id);
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -100,22 +93,14 @@ pub async fn batch_delete_lists(
     State(state): State<AppState>,
     Json(payload): Json<BatchDeleteRequest>,
 ) -> Result<StatusCode, Response> {
-    tracing::info!("=== BATCH DELETE LISTS REQUEST ===");
-    tracing::info!("List IDs: {:?}", payload.ids);
-    tracing::info!("Count: {}", payload.ids.len());
-
     state.download_service.delete_lists(payload.ids.clone())
         .await
         .map_err(|e| {
-            tracing::error!("=== BATCH DELETE LISTS FAILED ===");
-            tracing::error!("List IDs: {:?} - Error: {}", payload.ids, e);
+            tracing::error!("[API] Failed to batch delete lists ids={:?}: {}", payload.ids, e);
             (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
                 error: "Failed to batch delete lists".to_string()
             })).into_response()
         })?;
-
-    tracing::info!("=== BATCH DELETE LISTS SUCCESS ===");
-    tracing::info!("Deleted {} lists", payload.ids.len());
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -132,20 +117,14 @@ pub async fn rename_list(
     Path(id): Path<i64>,
     Json(payload): Json<RenameListRequest>,
 ) -> Result<StatusCode, Response> {
-    tracing::info!("=== RENAME LIST REQUEST ===");
-    tracing::info!("List ID: {}, New name: {}", id, payload.name);
-
     state.db.rename_list(id, &payload.name)
         .await
         .map_err(|e| {
-            tracing::error!("=== RENAME LIST FAILED ===");
-            tracing::error!("List ID: {} - Error: {}", id, e);
+            tracing::error!("[API] Failed to rename list id={}: {}", id, e);
             (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
                 error: "Failed to rename list".to_string()
             })).into_response()
         })?;
-
-    tracing::info!("=== RENAME LIST SUCCESS ===");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -154,15 +133,11 @@ pub async fn delete_list_with_items(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, Response> {
-    tracing::info!("=== DELETE LIST WITH ITEMS REQUEST ===");
-    tracing::info!("List ID: {}", id);
-
     // Get item IDs and delete list
     let item_ids = state.db.delete_list_with_items(id)
         .await
         .map_err(|e| {
-            tracing::error!("=== DELETE LIST WITH ITEMS FAILED ===");
-            tracing::error!("List ID: {} - Error: {}", id, e);
+            tracing::error!("[API] Failed to delete list with items id={}: {}", id, e);
             (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
                 error: "Failed to delete list".to_string()
             })).into_response()
@@ -175,18 +150,15 @@ pub async fn delete_list_with_items(
             // Delete the file
             if !item.file_path.is_empty() {
                 if let Err(e) = tokio::fs::remove_file(&item.file_path).await {
-                    tracing::warn!("Failed to delete file {}: {}", item.file_path, e);
+                    tracing::warn!("[API] Failed to delete file {}: {}", item.file_path, e);
                 }
             }
         }
         // Hard delete the item record
         if let Err(e) = state.db.hard_delete_item(*item_id).await {
-            tracing::warn!("Failed to hard delete item {}: {}", item_id, e);
+            tracing::warn!("[API] Failed to hard delete item {}: {}", item_id, e);
         }
     }
-
-    tracing::info!("=== DELETE LIST WITH ITEMS SUCCESS ===");
-    tracing::info!("Deleted list {} and {} items", id, item_ids.len());
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -196,20 +168,14 @@ pub async fn remove_item_from_list(
     State(state): State<AppState>,
     Path((list_id, item_id)): Path<(i64, i64)>,
 ) -> Result<StatusCode, Response> {
-    tracing::info!("=== REMOVE ITEM FROM LIST REQUEST ===");
-    tracing::info!("List ID: {}, Item ID: {}", list_id, item_id);
-
     state.download_service.remove_item_from_list(list_id, item_id)
         .await
         .map_err(|e| {
-            tracing::error!("=== REMOVE ITEM FROM LIST FAILED ===");
-            tracing::error!("List ID: {}, Item ID: {} - Error: {}", list_id, item_id, e);
+            tracing::error!("[API] Failed to remove item {} from list {}: {}", item_id, list_id, e);
             (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
                 error: "Failed to remove item from list".to_string()
             })).into_response()
         })?;
-
-    tracing::info!("=== REMOVE ITEM FROM LIST SUCCESS ===");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -219,21 +185,14 @@ pub async fn batch_remove_items_from_list(
     Path(list_id): Path<i64>,
     Json(payload): Json<BatchRemoveItemsRequest>,
 ) -> Result<StatusCode, Response> {
-    tracing::info!("=== BATCH REMOVE ITEMS FROM LIST REQUEST ===");
-    tracing::info!("List ID: {}, Item IDs: {:?}", list_id, payload.item_ids);
-
     state.download_service.remove_items_from_list(list_id, payload.item_ids.clone())
         .await
         .map_err(|e| {
-            tracing::error!("=== BATCH REMOVE ITEMS FROM LIST FAILED ===");
-            tracing::error!("List ID: {}, Item IDs: {:?} - Error: {}", list_id, payload.item_ids, e);
+            tracing::error!("[API] Failed to remove {} items from list {}: {}", payload.item_ids.len(), list_id, e);
             (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
                 error: "Failed to remove items from list".to_string()
             })).into_response()
         })?;
-
-    tracing::info!("=== BATCH REMOVE ITEMS FROM LIST SUCCESS ===");
-    tracing::info!("Removed {} items from list {}", payload.item_ids.len(), list_id);
 
     Ok(StatusCode::NO_CONTENT)
 }

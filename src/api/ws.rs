@@ -163,6 +163,50 @@ pub enum WsEvent {
         completed: i64,
         failed: i64,
     },
+
+    // ========================================================================
+    // Upload-related events
+    // ========================================================================
+
+    /// An upload has started
+    UploadStarted {
+        username: String,
+        filename: String,
+        file_size: u64,
+    },
+    /// Upload progress update
+    UploadProgress {
+        username: String,
+        filename: String,
+        bytes_sent: u64,
+        total_bytes: u64,
+        speed_kbps: f64,
+    },
+    /// Upload completed successfully
+    UploadCompleted {
+        username: String,
+        filename: String,
+        total_bytes: u64,
+    },
+    /// Upload failed
+    UploadFailed {
+        username: String,
+        filename: String,
+        error: String,
+    },
+
+    // ========================================================================
+    // Chat-related events
+    // ========================================================================
+
+    /// Private chat message received or sent
+    ChatMessage {
+        username: String,
+        message: String,
+        timestamp: u32,
+        incoming: bool,
+        is_new: bool,
+    },
 }
 
 /// Query params for WebSocket connection
@@ -195,7 +239,7 @@ pub async fn progress_handler(
 }
 
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
-    tracing::info!("WebSocket client connected");
+    tracing::debug!("WebSocket client connected");
 
     // Subscribe to broadcast channel
     let mut rx = state.ws_broadcast.subscribe();
@@ -236,7 +280,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     Ok(ws_event) => {
                         if let Ok(msg) = serde_json::to_string(&ws_event) {
                             if socket.send(Message::Text(msg)).await.is_err() {
-                                tracing::info!("WebSocket client disconnected (send error)");
+                                tracing::debug!("WebSocket client disconnected (send error)");
                                 return;
                             }
                         }
@@ -246,7 +290,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                         // Continue - we just missed some events
                     }
                     Err(broadcast::error::RecvError::Closed) => {
-                        tracing::info!("Broadcast channel closed");
+                        tracing::debug!("Broadcast channel closed");
                         return;
                     }
                 }
@@ -264,7 +308,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => {
-                        tracing::info!("WebSocket client disconnected");
+                        tracing::debug!("WebSocket client disconnected");
                         return;
                     }
                     _ => {}

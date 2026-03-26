@@ -15,6 +15,11 @@ pub struct User {
     pub verification_token: Option<String>,
     #[serde(skip_serializing)]
     pub verification_token_expires_at: Option<DateTime<Utc>>,
+    pub display_name: Option<String>,
+    pub bio: Option<String>,
+    #[serde(skip_serializing)]
+    pub avatar_path: Option<String>,
+    pub role: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -57,6 +62,14 @@ pub struct Item {
     pub meta_musicbrainz_id: Option<String>,
     pub metadata_fetched_at: Option<DateTime<Utc>>,
     pub metadata_sources: Option<String>, // JSON array
+
+    // Audio properties from file (migration 014)
+    pub sample_rate: Option<i32>,
+    pub bit_depth: Option<i32>,
+
+    // Cover art cache flag (migration 016)
+    #[serde(skip_serializing)]
+    pub cover_cached: bool,
 }
 
 /// Download status enum
@@ -153,7 +166,18 @@ pub struct UserResponse {
     pub username: String,
     pub email: String,
     pub email_verified: bool,
+    pub display_name: Option<String>,
+    pub bio: Option<String>,
+    pub has_avatar: bool,
+    pub role: String,
     pub created_at: DateTime<Utc>,
+}
+
+/// Update profile request
+#[derive(Debug, Deserialize)]
+pub struct UpdateProfileRequest {
+    pub display_name: Option<String>,
+    pub bio: Option<String>,
 }
 
 /// Search request
@@ -243,6 +267,22 @@ impl TrackMetadata {
     pub fn has_core_fields(&self) -> bool {
         self.artist.is_some() && self.title.is_some()
     }
+}
+
+/// System statistics for admin dashboard
+#[derive(Debug, Serialize)]
+pub struct SystemStats {
+    pub total_items: i64,
+    pub completed_items: i64,
+    pub failed_items: i64,
+    pub pending_items: i64,
+    pub total_storage_bytes: i64,
+    pub total_lists: i64,
+    pub total_users: i64,
+    pub items_with_metadata: i64,
+    pub items_without_metadata: i64,
+    pub items_with_cached_covers: i64,
+    pub items_without_cached_covers: i64,
 }
 
 /// Email verification request
@@ -385,6 +425,8 @@ impl EnqueueSearchRequest {
 pub struct ListTrackRequest {
     pub track: String,
     pub artist: Option<String>,
+    /// Client-generated ID for frontend tracking (prevents duplicate UI entries)
+    pub client_id: Option<String>,
 }
 
 /// Request to enqueue multiple searches (a list)

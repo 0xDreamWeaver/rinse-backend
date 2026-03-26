@@ -24,6 +24,7 @@
 //! MusicBrainz requires 1 request/second. This is enforced internally.
 //! Manual refresh is limited to once per 24 hours per track.
 
+pub mod cover_cache;
 pub mod coverart;
 pub mod discogs;
 pub mod getsongbpm;
@@ -46,6 +47,7 @@ use tracing;
 use crate::db::Database;
 use crate::models::TrackMetadata;
 
+use cover_cache::CoverCache;
 use coverart::CoverArtClient;
 use discogs::DiscogsClient;
 use getsongbpm::GetSongBpmClient;
@@ -60,6 +62,7 @@ pub struct MetadataService {
     discogs: DiscogsClient,
     coverart: CoverArtClient,
     getsongbpm: GetSongBpmClient,
+    cover_cache: CoverCache,
     /// Last MusicBrainz API call time (for rate limiting)
     last_mb_call: Arc<Mutex<Instant>>,
     /// Contact email for MusicBrainz User-Agent
@@ -72,7 +75,8 @@ impl MetadataService {
     /// # Arguments
     /// * `db` - Database connection
     /// * `ws_broadcast` - WebSocket broadcast channel
-    pub fn new(db: Database, ws_broadcast: broadcast::Sender<crate::api::WsEvent>) -> Self {
+    /// * `storage_path` - Path to storage directory (for cover art cache)
+    pub fn new(db: Database, ws_broadcast: broadcast::Sender<crate::api::WsEvent>, storage_path: &str) -> Self {
         let http_client = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
@@ -109,6 +113,7 @@ impl MetadataService {
         let discogs = DiscogsClient::new(http_client.clone());
         let coverart = CoverArtClient::new(http_client.clone());
         let getsongbpm = GetSongBpmClient::new(http_client.clone(), getsongbpm_api_key);
+        let cover_cache = CoverCache::new(storage_path, http_client.clone());
 
         // Initialize rate limiter with a time in the past
         let last_mb_call = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(10)));
@@ -128,9 +133,15 @@ impl MetadataService {
             discogs,
             coverart,
             getsongbpm,
+            cover_cache,
             last_mb_call,
             contact_email,
         }
+    }
+
+    /// Get a reference to the cover cache
+    pub fn cover_cache(&self) -> &CoverCache {
+        &self.cover_cache
     }
 
     /// Main entry point: Look up metadata and store in database
@@ -157,13 +168,11 @@ impl MetadataService {
         artist: Option<&str>,
         track: Option<&str>,
     ) -> Result<TrackMetadata> {
-        tracing::info!(
-            "[MetadataService] Starting lookup for item_id={}, artist={:?}, track={:?}, query='{}'",
-            item_id,
-            artist,
-            track,
-            query
-        );
+        let display_name = match (artist, track) {
+            (Some(a), Some(t)) if !a.is_empty() && !t.is_empty() => format!("{} - {}", a, t),
+            _ => query.to_string(),
+        };
+        tracing::info!("[Metadata] Lookup: item_id={} '{}'", item_id, display_name);
 
         let mut metadata = TrackMetadata::default();
         let mut errors: Vec<String> = Vec::new();
@@ -183,20 +192,14 @@ impl MetadataService {
 
         // Step 2: Query MusicBrainz (with rate limiting), fallback to Discogs
         // Use precise search if we have both artist and track, otherwise use query
+        let mut result_parts: Vec<String> = Vec::new();
+
         self.wait_for_rate_limit().await;
         let mb_result = match (artist, track) {
             (Some(a), Some(t)) if !a.is_empty() && !t.is_empty() => {
-                tracing::info!(
-                    "[MetadataService] Using precise MusicBrainz search: artist='{}', title='{}'",
-                    a, t
-                );
                 self.musicbrainz.search_recording_precise(a, t).await
             }
             _ => {
-                tracing::info!(
-                    "[MetadataService] Using query-based MusicBrainz search: '{}'",
-                    query
-                );
                 self.musicbrainz.search_recording(query).await
             }
         };
@@ -207,11 +210,7 @@ impl MetadataService {
                 let release_mbid = mb_metadata.musicbrainz_id.clone();
                 metadata.merge(mb_metadata);
                 got_metadata_from_primary = true;
-                tracing::info!(
-                    "[MetadataService] MusicBrainz found: artist={:?}, title={:?}",
-                    metadata.artist,
-                    metadata.title
-                );
+                result_parts.push("mb:found".to_string());
 
                 // Step 3: Get album art from Cover Art Archive (only if we have MBID)
                 if let Some(ref _mbid) = release_mbid {
@@ -247,13 +246,13 @@ impl MetadataService {
             }
             Err(e) => {
                 errors.push(format!("musicbrainz: {}", e));
-                tracing::warn!("[MetadataService] MusicBrainz lookup failed: {}", e);
+                result_parts.push("mb:failed".to_string());
+                tracing::warn!("[Metadata] MusicBrainz failed: {}", e);
             }
         }
 
         // Step 2b: Fallback to Discogs if MusicBrainz failed or returned incomplete data
         if !got_metadata_from_primary || metadata.artist.is_none() {
-            tracing::info!("[MetadataService] Trying Discogs as fallback");
             let discogs_result = match (artist, track) {
                 (Some(a), Some(t)) if !a.is_empty() && !t.is_empty() => {
                     self.discogs.search_release_precise(a, t).await
@@ -290,15 +289,25 @@ impl MetadataService {
                     if !metadata.sources.contains(&"discogs".to_string()) {
                         metadata.sources.push("discogs".to_string());
                     }
-                    tracing::info!(
-                        "[MetadataService] Discogs merged: artist={:?}, title={:?}",
-                        metadata.artist,
-                        metadata.title
-                    );
+                    result_parts.push("discogs:merged".to_string());
                 }
                 Err(e) => {
                     errors.push(format!("discogs: {}", e));
-                    tracing::warn!("[MetadataService] Discogs lookup failed: {}", e);
+                    result_parts.push("discogs:failed".to_string());
+                    tracing::warn!("[Metadata] Discogs failed: {}", e);
+                }
+            }
+        }
+
+        // Cache cover art locally (after all art sources have been tried)
+        if let Some(ref art_url) = metadata.album_art_url {
+            match self.cover_cache.cache_cover(item_id, art_url).await {
+                Ok(true) => {
+                    let _ = self.db.set_cover_cached(item_id, true).await;
+                    tracing::info!("[CoverCache] Cached cover art for item {}", item_id);
+                }
+                Ok(false) | Err(_) => {
+                    tracing::debug!("[CoverCache] Cover caching skipped/failed for item {}", item_id);
                 }
             }
         }
@@ -320,15 +329,16 @@ impl MetadataService {
                     if !metadata.sources.contains(&"getsongbpm".to_string()) {
                         metadata.sources.push("getsongbpm".to_string());
                     }
-                    tracing::info!(
-                        "[MetadataService] GetSongBPM found: bpm={:?}, key={:?}",
-                        metadata.bpm,
-                        metadata.key
-                    );
+                    if let Some(bpm) = metadata.bpm {
+                        result_parts.push(format!("bpm:{}", bpm));
+                    }
+                    if let Some(ref key) = metadata.key {
+                        result_parts.push(format!("key:{}", key));
+                    }
                 }
                 Err(e) => {
                     errors.push(format!("getsongbpm: {}", e));
-                    tracing::warn!("[MetadataService] GetSongBPM lookup failed: {}", e);
+                    tracing::warn!("[Metadata] GetSongBPM failed: {}", e);
                 }
             }
         }
@@ -337,29 +347,41 @@ impl MetadataService {
         metadata.fetched_at = Some(Utc::now());
 
         // Step 5: Store in database
+        let mut db_ok = true;
         if let Err(e) = self.db.update_item_metadata(item_id, &metadata).await {
             errors.push(format!("db_store: {}", e));
-            tracing::error!("[MetadataService] Failed to store metadata: {}", e);
-        } else {
-            tracing::info!("[MetadataService] Stored metadata for item_id={}", item_id);
+            tracing::error!("[Metadata] Failed to store metadata: {}", e);
+            db_ok = false;
         }
 
         // Step 6: Write tags to file (best effort)
+        let mut tags_written = false;
         if metadata.has_core_fields() {
             if let Err(e) = tags::write_tags(file_path, &metadata) {
                 errors.push(format!("tag_write: {}", e));
-                tracing::warn!("[MetadataService] Failed to write file tags: {}", e);
+                tracing::warn!("[Metadata] Failed to write file tags: {}", e);
             } else {
-                tracing::info!("[MetadataService] Wrote tags to file: {}", file_path);
+                tags_written = true;
             }
         }
 
-        // Log any partial failures
+        // Build summary
+        if tags_written {
+            result_parts.push("tags:written".to_string());
+        }
+        if !db_ok {
+            result_parts.push("db:failed".to_string());
+        }
+
+        tracing::info!(
+            "[Metadata] Result: item_id={} — {}",
+            item_id, result_parts.join(", ")
+        );
+
         if !errors.is_empty() {
-            tracing::warn!(
-                "[MetadataService] Completed with {} partial failures: {:?}",
-                errors.len(),
-                errors
+            tracing::debug!(
+                "[Metadata] Partial failures for item_id={}: {:?}",
+                item_id, errors
             );
         }
 
@@ -369,7 +391,11 @@ impl MetadataService {
     /// Refresh metadata for an existing item
     ///
     /// Subject to 24-hour rate limit per track.
-    pub async fn refresh_metadata(&self, item_id: i64) -> Result<TrackMetadata> {
+    ///
+    /// If `skip_existing` is true and the item already has core metadata
+    /// (artist + title + album art), the API lookup is skipped. Audio
+    /// properties (sample_rate, bit_depth) are always read regardless.
+    pub async fn refresh_metadata(&self, item_id: i64, skip_existing: bool) -> Result<TrackMetadata> {
         // Check rate limit
         if !self.can_refresh(item_id).await? {
             anyhow::bail!("Rate limit: metadata can only be refreshed once per 24 hours");
@@ -381,6 +407,48 @@ impl MetadataService {
             .get_item(item_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Item not found: {}", item_id))?;
+
+        // Always read audio properties from the file (backfills sample_rate/bit_depth)
+        match tags::read_audio_properties(&item.file_path) {
+            Ok(props) => {
+                if let Err(e) = self
+                    .db
+                    .update_item_audio_properties(item_id, props.sample_rate, props.bit_depth)
+                    .await
+                {
+                    tracing::warn!(
+                        "[MetadataService] Failed to update audio properties for item {}: {}",
+                        item_id, e
+                    );
+                } else {
+                    tracing::debug!(
+                        "[Metadata] Audio properties for item {}: sample_rate={:?}, bit_depth={:?}",
+                        item_id, props.sample_rate, props.bit_depth
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "[MetadataService] Failed to read audio properties for item {}: {}",
+                    item_id, e
+                );
+            }
+        }
+
+        // If skip_existing is set and item already has core metadata, skip API lookup
+        if skip_existing
+            && item.meta_artist.is_some()
+            && item.meta_title.is_some()
+            && item.meta_album_art_url.is_some()
+        {
+            tracing::info!(
+                "[MetadataService] Skipping API lookup for item {} (already has core metadata)",
+                item_id
+            );
+            // Return existing metadata from database
+            let existing = self.db.get_item_metadata(item_id).await?;
+            return Ok(existing.unwrap_or_default());
+        }
 
         // Perform lookup
         let metadata = self

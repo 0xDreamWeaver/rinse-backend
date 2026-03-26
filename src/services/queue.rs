@@ -2,7 +2,7 @@
 //!
 //! This service provides:
 //! - Enqueueing of single searches and lists
-//! - A queue worker that processes searches sequentially (Soulseek server limitation)
+//! - A queue worker that processes searches concurrently (semaphore-bounded)
 //! - A transfer monitor that handles completion of spawned file transfers
 //!
 //! Architecture:
@@ -11,9 +11,9 @@
 //!          ↓
 //!     Search Queue (DB)
 //!          ↓
-//!     Queue Worker (sequential)
+//!     Queue Worker (concurrent, semaphore-bounded)
 //!          ↓
-//!     Search → Negotiate → Get FileConnection
+//!     Search → Negotiate → Get FileConnection (parallel)
 //!          ↓
 //!     Spawn file transfer (independent task)
 //!          ↓
@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use std::path::{Path, PathBuf};
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc, RwLock, Semaphore};
 use tokio::task::JoinHandle;
 use anyhow::{Result, bail};
 
@@ -68,6 +68,8 @@ pub struct QueueConfig {
     pub search_timeout_secs: u64,
     /// Storage path for downloaded files
     pub storage_path: PathBuf,
+    /// Maximum number of concurrent searches (default: 8)
+    pub max_concurrent_searches: usize,
 }
 
 impl Default for QueueConfig {
@@ -76,6 +78,7 @@ impl Default for QueueConfig {
             poll_interval_ms: 500,
             search_timeout_secs: 10,
             storage_path: PathBuf::from("storage"),
+            max_concurrent_searches: 8,
         }
     }
 }
@@ -83,7 +86,7 @@ impl Default for QueueConfig {
 /// Queue service for managing search queue and file transfers
 pub struct QueueService {
     db: Database,
-    slsk_client: Arc<RwLock<Option<SoulseekClient>>>,
+    slsk_client: Arc<SoulseekClient>,
     ws_broadcast: broadcast::Sender<WsEvent>,
     config: QueueConfig,
     /// Channel for receiving transfer completion notifications
@@ -91,6 +94,8 @@ pub struct QueueService {
     transfer_completion_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<TransferCompletion>>>,
     /// Metadata service for enriching downloaded tracks
     metadata_service: Arc<MetadataService>,
+    /// Sharing service for adding newly downloaded files to the share index
+    sharing_service: Arc<crate::services::SharingService>,
     /// Cached search candidates by queue_id for retry without re-searching
     /// When a download fails, we try the next candidate from this list
     pending_candidates: Arc<RwLock<HashMap<i64, Vec<ScoredFile>>>>,
@@ -100,10 +105,11 @@ impl QueueService {
     /// Create a new queue service
     pub fn new(
         db: Database,
-        slsk_client: Arc<RwLock<Option<SoulseekClient>>>,
+        slsk_client: Arc<SoulseekClient>,
         ws_broadcast: broadcast::Sender<WsEvent>,
         config: QueueConfig,
         metadata_service: Arc<MetadataService>,
+        sharing_service: Arc<crate::services::SharingService>,
     ) -> Self {
         let (tx, rx) = mpsc::channel::<TransferCompletion>(100);
 
@@ -115,6 +121,7 @@ impl QueueService {
             transfer_completion_tx: tx,
             transfer_completion_rx: Arc::new(tokio::sync::Mutex::new(rx)),
             metadata_service,
+            sharing_service,
             pending_candidates: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -191,7 +198,7 @@ impl QueueService {
         &self,
         user_id: i64,
         name: Option<String>,
-        tracks: Vec<(String, Option<String>, Option<String>)>,
+        tracks: Vec<(String, Option<String>, Option<String>, Option<String>)>,
         format: Option<String>,
     ) -> Result<(List, Vec<QueuedSearch>)> {
         let list_name = name.unwrap_or_else(|| {
@@ -321,46 +328,79 @@ impl QueueService {
         Ok((searches_reset, downloads_failed))
     }
 
+    /// Recalculate progress for all lists stuck in "downloading" status.
+    /// Should be called after `recover_on_startup()` to fix lists whose items
+    /// were marked failed by recovery but whose list status was never updated.
+    pub async fn recalculate_downloading_lists(&self) {
+        match self.db.get_lists_by_status("downloading").await {
+            Ok(lists) => {
+                if !lists.is_empty() {
+                    tracing::info!(
+                        "[QueueService] Recalculating progress for {} downloading lists",
+                        lists.len()
+                    );
+                    for list in lists {
+                        self.update_list_progress(list.id).await;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("[QueueService] Failed to recalculate list progress: {}", e);
+            }
+        }
+    }
+
     // ========================================================================
     // Worker and monitor startup
     // ========================================================================
 
     /// Start the queue worker
     ///
-    /// The worker processes searches sequentially (Soulseek server limitation).
-    /// It pulls from the queue, executes searches, and spawns file transfers.
+    /// Start the queue worker with concurrent search processing.
+    ///
+    /// Uses a semaphore to limit concurrent searches to `max_concurrent_searches`.
+    /// Each search is spawned as an independent task, enabling parallel processing.
     ///
     /// Returns a JoinHandle that can be used to monitor/abort the worker.
     pub fn start_worker(self: &Arc<Self>) -> JoinHandle<()> {
         let service = Arc::clone(self);
+        let semaphore = Arc::new(Semaphore::new(service.config.max_concurrent_searches));
 
         tokio::spawn(async move {
-            tracing::info!("[QueueWorker] Started");
+            tracing::info!(
+                "[QueueWorker] Started (max_concurrent_searches={})",
+                service.config.max_concurrent_searches
+            );
 
             loop {
-                // Check if connected to Soulseek
-                let connected = {
-                    let client_guard = service.slsk_client.read().await;
-                    client_guard.is_some()
+                // Acquire semaphore permit (limits concurrency)
+                let permit = match semaphore.clone().acquire_owned().await {
+                    Ok(p) => p,
+                    Err(_) => {
+                        tracing::error!("[QueueWorker] Semaphore closed");
+                        break;
+                    }
                 };
 
-                if !connected {
-                    // Not connected, wait and retry
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    continue;
-                }
-
-                // Try to get next pending search
-                match service.db.get_next_pending_search().await {
+                // Try to claim the next pending search atomically
+                // (mark as processing BEFORE spawning to prevent TOCTOU race)
+                match service.db.claim_next_pending_search().await {
                     Ok(Some(queued)) => {
-                        service.process_queued_search(queued).await;
+                        let svc = Arc::clone(&service);
+                        // Spawn each search as independent task
+                        tokio::spawn(async move {
+                            svc.process_queued_search(queued).await;
+                            drop(permit); // Release semaphore
+                        });
                     }
                     Ok(None) => {
-                        // No pending searches, wait before polling again
+                        // No pending searches, release permit and wait
+                        drop(permit);
                         tokio::time::sleep(Duration::from_millis(service.config.poll_interval_ms)).await;
                     }
                     Err(e) => {
-                        tracing::error!("[QueueWorker] Error getting next search: {}", e);
+                        drop(permit);
+                        tracing::error!("[QueueWorker] Error claiming next search: {}", e);
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                 }
@@ -404,14 +444,29 @@ impl QueueService {
         let client_id = queued.client_id.clone();
 
         tracing::info!(
-            "[QueueWorker] Processing search: id={}, query='{}', retry_count={}, client_id={:?}",
-            queue_id, query, retry_count, client_id
+            "[QueueWorker] Processing: id={}, query='{}', retry={}",
+            queue_id, query, retry_count
         );
 
-        // Mark as processing
-        if let Err(e) = self.db.mark_search_processing(queue_id).await {
-            tracing::error!("[QueueWorker] Failed to mark search as processing: {}", e);
-            return;
+        // Verify this search is still in 'processing' state (it was claimed atomically by the worker loop).
+        // This guards against edge cases where the search was cancelled between claim and processing.
+        match self.db.get_queued_search(queue_id).await {
+            Ok(Some(q)) if q.status == "processing" => { /* good, proceed */ }
+            Ok(Some(q)) => {
+                tracing::warn!(
+                    "[QueueWorker] Search {} has unexpected status '{}', skipping",
+                    queue_id, q.status
+                );
+                return;
+            }
+            Ok(None) => {
+                tracing::warn!("[QueueWorker] Search {} no longer exists, skipping", queue_id);
+                return;
+            }
+            Err(e) => {
+                tracing::error!("[QueueWorker] Failed to verify search status: {}", e);
+                return;
+            }
         }
 
         // Broadcast processing started
@@ -438,15 +493,7 @@ impl QueueService {
                         // If this is part of a list, add item to list and update progress
                         if let (Some(list_id), Some(pos)) = (queued.list_id, queued.list_position) {
                             if let Err(e) = self.db.add_item_to_list(list_id, item.id, pos).await {
-                                tracing::error!(
-                                    "[QueueWorker] Failed to add item {} to list {}: {}",
-                                    item.id, list_id, e
-                                );
-                            } else {
-                                tracing::info!(
-                                    "[QueueWorker] Added item {} to list {} at position {}",
-                                    item.id, list_id, pos
-                                );
+                                tracing::error!("[QueueWorker] Failed to add item {} to list {}: {}", item.id, list_id, e);
                             }
                             self.update_list_progress(list_id).await;
                         }
@@ -483,11 +530,6 @@ impl QueueService {
                             tracing::error!("[QueueWorker] Failed to update search with item_id: {}", e);
                         }
                         // NOTE: Do NOT delete queue entry - TransferMonitor will do it
-
-                        tracing::info!(
-                            "[QueueWorker] Download initiated (in progress): queue_id={}, item_id={}, status={}",
-                            queue_id, item.id, item.download_status
-                        );
                     }
                     _ => {
                         // Unexpected status - treat as error
@@ -514,6 +556,11 @@ impl QueueService {
 
                     if let Err(e) = self.db.mark_search_for_retry(queue_id, &error_msg).await {
                         tracing::error!("[QueueWorker] Failed to mark search for retry: {}", e);
+                    }
+
+                    // Update list progress so UI reflects the retry is pending
+                    if let Some(list_id) = queued.list_id {
+                        self.update_list_progress(list_id).await;
                     }
 
                     // Broadcast retry queued (not a permanent failure)
@@ -549,8 +596,51 @@ impl QueueService {
                         tracing::error!("[QueueWorker] Failed to insert search history: {}", e);
                     }
 
-                    // If this is part of a list, update list progress
+                    // If this is part of a list, create a placeholder failed item and update progress
                     if let Some(list_id) = queued.list_id {
+                        let placeholder_filename = match (queued.original_artist.as_deref(), queued.original_track.as_deref()) {
+                            (Some(artist), Some(track)) => format!("{} - {}", artist, track),
+                            _ => query.clone(),
+                        };
+
+                        // Use a unique placeholder path to avoid UNIQUE constraint on file_path
+                        let placeholder_path = format!("__failed_placeholder_{}", queue_id);
+
+                        match self.db.create_item(
+                            &placeholder_filename,
+                            &query,
+                            queued.original_artist.as_deref(),
+                            queued.original_track.as_deref(),
+                            &placeholder_path,
+                            0,   // no file size
+                            None, // no bitrate
+                            None, // no duration
+                            "",  // no extension
+                            "",  // no source username
+                        ).await {
+                            Ok(item) => {
+                                // Mark the placeholder as failed
+                                if let Err(e) = self.db.update_item_status(
+                                    item.id, "failed", 0.0, Some(&error_msg)
+                                ).await {
+                                    tracing::debug!("[QueueWorker] Failed to set placeholder item status: {}", e);
+                                }
+                                // Add to the list
+                                if let Err(e) = self.db.add_item_to_list(
+                                    list_id, item.id, queued.list_position.unwrap_or(0)
+                                ).await {
+                                    tracing::debug!("[QueueWorker] Failed to add placeholder item to list: {}", e);
+                                }
+                                tracing::debug!(
+                                    "[QueueWorker] Created failed placeholder item {} for list {} ('{}')",
+                                    item.id, list_id, placeholder_filename
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!("[QueueWorker] Failed to create placeholder item for list {}: {}", list_id, e);
+                            }
+                        }
+
                         self.update_list_progress(list_id).await;
                     }
 
@@ -570,12 +660,11 @@ impl QueueService {
     ///
     /// This method:
     /// 1. Checks for duplicates (fuzzy matching)
-    /// 2. Acquires slsk_client lock
-    /// 3. Executes search
-    /// 4. Selects best file
-    /// 5. Creates item in DB
-    /// 6. Calls initiate_download (non-blocking)
-    /// 7. Returns item (download continues in background via listener)
+    /// 2. Executes search (concurrent-safe, no exclusive lock needed)
+    /// 3. Selects best file
+    /// 4. Creates item in DB
+    /// 5. Calls initiate_download (non-blocking)
+    /// 6. Returns item (download continues in background via listener)
     async fn execute_search_and_download(&self, queued: &QueuedSearch) -> Result<Item> {
         let query = &queued.query;
         let format = queued.format.as_deref();
@@ -585,11 +674,6 @@ impl QueueService {
         let client_id = queued.client_id.clone();
         let original_artist = queued.original_artist.clone();
         let original_track = queued.original_track.clone();
-
-        tracing::info!(
-            "[QueueWorker] Executing search for: '{}' (format: {:?}, client_id: {:?})",
-            query, format, client_id
-        );
 
         // Broadcast search started
         self.broadcast(WsEvent::SearchStarted {
@@ -620,10 +704,8 @@ impl QueueService {
             return Ok(existing.clone());
         }
 
-        // Acquire Soulseek client lock (needed for both search and download)
-        let mut client_guard = self.slsk_client.write().await;
-        let client = client_guard.as_mut()
-            .ok_or_else(|| anyhow::anyhow!("Not connected to Soulseek"))?;
+        // No lock needed - SoulseekClient methods take &self
+        let client = &self.slsk_client;
 
         // Check for cached candidates from previous failed attempt
         let mut scored_file: Option<ScoredFile> = None;
@@ -649,14 +731,9 @@ impl QueueService {
         // If no cached candidates, do a fresh search
         if scored_file.is_none() {
             // Execute search
-            tracing::info!("[QueueWorker] Sending search query to Soulseek network...");
             let results = client.search(query, self.config.search_timeout_secs).await?;
 
             let total_files: usize = results.iter().map(|r| r.files.len()).sum();
-            tracing::info!(
-                "[QueueWorker] Search completed: {} users returned {} files",
-                results.len(), total_files
-            );
 
             // Broadcast search progress
             self.broadcast(WsEvent::SearchProgress {
@@ -704,26 +781,19 @@ impl QueueService {
 
             // Cache remaining candidates for retry (limit to top 5 alternatives)
             let candidates_to_cache: Vec<ScoredFile> = all_candidates.into_iter().take(5).collect();
+            let cached_count = candidates_to_cache.len();
             if !candidates_to_cache.is_empty() {
-                tracing::info!(
-                    "[QueueWorker] Caching {} alternative candidates for queue_id={}",
-                    candidates_to_cache.len(),
-                    queue_id
-                );
                 self.pending_candidates.write().await.insert(queue_id, candidates_to_cache);
             }
+
+            let sf = scored_file.as_ref().unwrap();
+            tracing::info!(
+                "[QueueWorker] Selected '{}' from '{}' (score={:.1}, {:?} kbps) [{} alternatives cached]",
+                sf.filename, sf.username, sf.score, sf.bitrate, cached_count
+            );
         }
 
         let scored_file = scored_file.unwrap();
-
-        tracing::info!(
-            "[QueueWorker] Selected '{}' from '{}' (score={:.1}, {:?} kbps){}",
-            scored_file.filename,
-            scored_file.username,
-            scored_file.score,
-            scored_file.bitrate,
-            if used_cached { " [from cache]" } else { "" }
-        );
 
         // Prepare file info
         let remote_filename = scored_file.filename.clone();
@@ -739,16 +809,13 @@ impl QueueService {
         // Check for existing item with same file_path (retry scenario)
         if let Some(existing) = self.db.find_item_by_path(file_path.to_str().unwrap()).await? {
             if existing.download_status != "completed" {
-                tracing::info!(
-                    "[QueueWorker] Found existing {} item for same file_path, deleting for retry: id={}",
-                    existing.download_status, existing.id
-                );
+                tracing::debug!("[QueueWorker] Replacing existing {} item id={} for retry", existing.download_status, existing.id);
+                if let Some(lid) = list_id {
+                    let _ = self.db.remove_item_from_list(lid, existing.id).await;
+                }
                 self.db.delete_item(existing.id).await?;
             } else {
-                tracing::info!(
-                    "[QueueWorker] Found existing completed item for same file_path: {}",
-                    existing.filename
-                );
+                tracing::debug!("[QueueWorker] Found existing completed item: {}", existing.filename);
                 return Ok(existing);
             }
         }
@@ -774,15 +841,7 @@ impl QueueService {
         // (this captures both successful and failed downloads)
         if let (Some(lid), Some(pos)) = (list_id, list_position) {
             if let Err(e) = self.db.add_item_to_list(lid, item.id, pos).await {
-                tracing::error!(
-                    "[QueueWorker] Failed to add item {} to list {}: {}",
-                    item.id, lid, e
-                );
-            } else {
-                tracing::info!(
-                    "[QueueWorker] Added item {} to list {} at position {}",
-                    item.id, lid, pos
-                );
+                tracing::error!("[QueueWorker] Failed to add item {} to list {}: {}", item.id, lid, e);
             }
         }
 
@@ -863,11 +922,7 @@ impl QueueService {
         ).await;
 
         match download_result {
-            DownloadInitResult::TransferSpawned { item_id: _, transfer_token } => {
-                tracing::info!(
-                    "[QueueWorker] Download initiated, transfer pending (token={})",
-                    transfer_token
-                );
+            DownloadInitResult::TransferSpawned { item_id: _, transfer_token: _ } => {
                 item.download_status = "downloading".to_string();
                 Ok(item)
             }
@@ -913,8 +968,13 @@ impl QueueService {
     }
 
     /// Update list progress after a search completes or fails
+    ///
+    /// Uses a robust check: instead of comparing against `total_items` (which can drift
+    /// due to retries/removals), we check whether there are any non-terminal items in the
+    /// list AND any pending searches in the queue for this list. Only when both are zero
+    /// do we transition to a final status.
     async fn update_list_progress(&self, list_id: i64) {
-        // Get the list to know total_items
+        // Get the list for display total
         let list = match self.db.get_list(list_id).await {
             Ok(Some(list)) => list,
             Ok(None) => {
@@ -927,10 +987,8 @@ impl QueueService {
             }
         };
 
-        let total = list.total_items;
-
         // Count completed and failed items from list_items table
-        let (completed, failed, _items_in_list) = match self.db.count_list_items_by_status(list_id).await {
+        let (completed, failed, total_in_list) = match self.db.count_list_items_by_status(list_id).await {
             Ok(counts) => counts,
             Err(e) => {
                 tracing::error!("[QueueWorker] Failed to count list items: {}", e);
@@ -938,9 +996,18 @@ impl QueueService {
             }
         };
 
+        // Items in non-terminal states (downloading, queued, pending)
+        let unresolved_items = total_in_list - completed - failed;
+
+        // Pending/processing/retry searches still in the queue for this list
+        let pending_searches = self.db.count_pending_searches_for_list(list_id).await.unwrap_or(0);
+
         // Determine list status
-        let status = if completed + failed >= total {
-            if failed == 0 {
+        let status = if unresolved_items == 0 && pending_searches == 0 {
+            // All work is done — determine final status
+            if completed == 0 && failed == 0 {
+                "pending"
+            } else if failed == 0 {
                 "completed"
             } else if completed == 0 {
                 "failed"
@@ -950,6 +1017,9 @@ impl QueueService {
         } else {
             "downloading"
         };
+
+        // Use the larger of total_items and actual items for display
+        let display_total = std::cmp::max(list.total_items, total_in_list);
 
         // Update list
         if let Err(e) = self.db.update_list_status(list_id, status, completed, failed).await {
@@ -961,7 +1031,7 @@ impl QueueService {
             list_id,
             completed,
             failed,
-            total,
+            total: display_total,
             status: status.to_string(),
         });
     }
@@ -986,8 +1056,8 @@ impl QueueService {
         match result {
             Ok(bytes) => {
                 tracing::info!(
-                    "[TransferMonitor] Transfer completed: item_id={}, queue_id={}, bytes={}, client_id={:?}",
-                    item_id, queue_id, bytes, client_id
+                    "[TransferMonitor] Completed: item_id={}, {:.2} MB",
+                    item_id, bytes as f64 / 1_048_576.0
                 );
 
                 // Update item status to completed
@@ -997,6 +1067,34 @@ impl QueueService {
 
                 // Note: Item was already added to list_items at creation time
                 // (in execute_search_and_download), so we don't need to add it here
+
+                // Read audio properties (sample rate, bit depth) from the downloaded file
+                if let Ok(Some(ref item)) = self.db.get_item(item_id).await {
+                    if !item.file_path.is_empty() {
+                        match crate::services::metadata::tags::read_audio_properties(&item.file_path) {
+                            Ok(props) => {
+                                if let Err(e) = self.db.update_item_audio_properties(
+                                    item_id, props.sample_rate, props.bit_depth
+                                ).await {
+                                    tracing::error!("[TransferMonitor] Failed to update audio properties: {}", e);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("[TransferMonitor] Failed to read audio props for item {}: {}", item_id, e);
+                            }
+                        }
+                    }
+                }
+
+                // Add newly downloaded file to share index
+                if let Ok(Some(ref item)) = self.db.get_item(item_id).await {
+                    if !item.file_path.is_empty() {
+                        let file_path = std::path::Path::new(&item.file_path);
+                        if let Err(e) = self.sharing_service.add_file(file_path).await {
+                            tracing::warn!("[TransferMonitor] Failed to add file to share index: {}", e);
+                        }
+                    }
+                }
 
                 // Get item info for broadcast
                 if let Ok(Some(item)) = self.db.get_item(item_id).await {
@@ -1022,10 +1120,6 @@ impl QueueService {
                     let ws_broadcast = self.ws_broadcast.clone();
 
                     tokio::spawn(async move {
-                        tracing::info!(
-                            "[MetadataService] Starting metadata lookup for item_id={}",
-                            item_id
-                        );
                         let _ = ws_broadcast.send(WsEvent::MetadataLookupStarted { item_id });
 
                         match metadata_service
@@ -1039,11 +1133,9 @@ impl QueueService {
                             .await
                         {
                             Ok(metadata) => {
-                                tracing::info!(
-                                    "[MetadataService] Metadata lookup complete for item_id={}: artist={:?}, bpm={:?}",
-                                    item_id,
-                                    metadata.artist,
-                                    metadata.bpm
+                                tracing::debug!(
+                                    "[Metadata] Lookup complete for item_id={}: artist={:?}, bpm={:?}",
+                                    item_id, metadata.artist, metadata.bpm
                                 );
                                 let _ = ws_broadcast.send(WsEvent::MetadataUpdated {
                                     item_id,
@@ -1098,8 +1190,8 @@ impl QueueService {
             }
             Err(error_msg) => {
                 tracing::warn!(
-                    "[TransferMonitor] Transfer failed: item_id={}, queue_id={}, error={}, client_id={:?}",
-                    item_id, queue_id, error_msg, client_id
+                    "[TransferMonitor] Failed: item_id={}, queue_id={}, error={}",
+                    item_id, queue_id, error_msg
                 );
 
                 // Update item status to failed
@@ -1107,6 +1199,12 @@ impl QueueService {
                     item_id, "failed", 0.0, Some(&error_msg)
                 ).await {
                     tracing::error!("[TransferMonitor] Failed to update item status: {}", e);
+                }
+
+                // Update list progress immediately so the UI reflects the failure,
+                // even if this item will be retried (a later success will correct the counts)
+                if let Some(list_id) = list_id {
+                    self.update_list_progress(list_id).await;
                 }
 
                 // Get retry_count from pre-fetched queued search
@@ -1129,10 +1227,7 @@ impl QueueService {
                 // Apply retry logic
                 if retry_count == 0 {
                     // First failure - mark for retry
-                    tracing::info!(
-                        "[TransferMonitor] Transfer failed (will retry): queue_id={}, item_id={}",
-                        queue_id, item_id
-                    );
+                    tracing::info!("[TransferMonitor] Will retry: queue_id={}", queue_id);
 
                     if let Err(e) = self.db.mark_search_for_retry(queue_id, &error_msg).await {
                         tracing::error!("[TransferMonitor] Failed to mark for retry: {}", e);
@@ -1153,10 +1248,7 @@ impl QueueService {
 
                     if has_more_candidates {
                         // We have more candidates - mark for retry to try next one
-                        tracing::info!(
-                            "[TransferMonitor] Transfer failed, trying next cached candidate: queue_id={}, item_id={}",
-                            queue_id, item_id
-                        );
+                        tracing::info!("[TransferMonitor] Trying next cached candidate: queue_id={}", queue_id);
 
                         if let Err(e) = self.db.mark_search_for_retry(queue_id, &error_msg).await {
                             tracing::error!("[TransferMonitor] Failed to mark for retry: {}", e);
@@ -1170,10 +1262,7 @@ impl QueueService {
                         });
                     } else {
                         // No more candidates - permanent failure
-                        tracing::warn!(
-                            "[TransferMonitor] Transfer failed permanently (no more candidates): queue_id={}, item_id={}",
-                            queue_id, item_id
-                        );
+                        tracing::warn!("[TransferMonitor] No more candidates, permanent failure: queue_id={}", queue_id);
 
                         // Clean up cached candidates
                         self.pending_candidates.write().await.remove(&queue_id);
@@ -1205,11 +1294,6 @@ impl QueueService {
                             error: error_msg,
                             client_id,
                         });
-
-                        // Update list progress if applicable
-                        if let Some(list_id) = list_id {
-                            self.update_list_progress(list_id).await;
-                        }
                     }
                 }
             }

@@ -126,8 +126,8 @@ pub async fn enqueue_list(
         return Err((StatusCode::BAD_REQUEST, "Tracks list cannot be empty".to_string()));
     }
 
-    // Convert tracks to (query, artist, track) tuples and filter out empty tracks
-    let tracks: Vec<(String, Option<String>, Option<String>)> = request.tracks.into_iter()
+    // Convert tracks to (query, artist, track, client_id) tuples and filter out empty tracks
+    let tracks: Vec<(String, Option<String>, Option<String>, Option<String>)> = request.tracks.into_iter()
         .filter(|t| !t.track.trim().is_empty())
         .map(|t| {
             // Build combined query
@@ -137,7 +137,7 @@ pub async fn enqueue_list(
                 }
                 _ => t.track.trim().to_string(),
             };
-            (query, t.artist, Some(t.track))
+            (query, t.artist, Some(t.track), t.client_id)
         })
         .collect();
 

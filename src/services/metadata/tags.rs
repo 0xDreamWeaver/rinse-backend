@@ -185,6 +185,30 @@ pub fn write_tags<P: AsRef<Path>>(file_path: P, metadata: &TrackMetadata) -> Res
     Ok(())
 }
 
+/// Audio properties read from a file (sample rate, bit depth)
+pub struct AudioProperties {
+    pub sample_rate: Option<i32>,
+    pub bit_depth: Option<i32>,
+}
+
+/// Read audio properties (sample rate, bit depth) from a file
+pub fn read_audio_properties<P: AsRef<Path>>(file_path: P) -> Result<AudioProperties> {
+    let file_path = file_path.as_ref();
+    tracing::debug!("[Tags] Reading audio properties from: {}", file_path.display());
+
+    let tagged_file = Probe::open(file_path)
+        .context("Failed to open audio file")?
+        .read()
+        .context("Failed to read audio file")?;
+
+    let properties = tagged_file.properties();
+    let sample_rate = properties.sample_rate().map(|sr| sr as i32);
+    let bit_depth = properties.bit_depth().map(|bd| bd as i32);
+
+    tracing::debug!("[Tags] Audio properties: sample_rate={:?}, bit_depth={:?}", sample_rate, bit_depth);
+    Ok(AudioProperties { sample_rate, bit_depth })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

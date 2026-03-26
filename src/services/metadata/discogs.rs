@@ -180,23 +180,23 @@ impl DiscogsClient {
     /// Returns TrackMetadata with fields populated from the best match.
     pub async fn search_release(&self, query: &str) -> Result<TrackMetadata> {
         let start = std::time::Instant::now();
-        tracing::info!("[Discogs] Searching for: '{}' (authenticated={})", query, self.token.is_some());
 
-        let mut url = format!(
+        let url = format!(
             "https://api.discogs.com/database/search?q={}&type=release&per_page=10",
             urlencoding::encode(query)
         );
 
-        // Add token if available
-        if let Some(ref token) = self.token {
-            url.push_str(&format!("&token={}", token));
-        }
-
-        let response = self
+        let mut request = self
             .http_client
             .get(&url)
             .header("User-Agent", &self.user_agent)
-            .header("Accept", "application/json")
+            .header("Accept", "application/json");
+
+        if let Some(ref token) = self.token {
+            request = request.header("Authorization", format!("Discogs token={}", token));
+        }
+
+        let response = request
             .send()
             .await
             .context("Failed to send Discogs request")?;
@@ -230,17 +230,14 @@ impl DiscogsClient {
             anyhow::bail!("No results found for query: {}", query);
         }
 
-        // Log results for debugging
-        tracing::info!("[Discogs] === {} results for query: '{}' ===", results.len(), query);
+        tracing::info!("[Discogs] Search: '{}' (authenticated={}) -> {} results",
+            query, self.token.is_some(), results.len());
+        // Log individual results at debug level
         for (i, result) in results.iter().take(5).enumerate() {
             let score = self.score_result_match(query, result);
-            tracing::info!(
-                "[Discogs]   #{}: title='{}', year={:?}, label={:?}, score={}",
-                i + 1,
-                result.title.as_deref().unwrap_or("Unknown"),
-                result.year,
-                result.label.as_ref().and_then(|l| l.first()),
-                score
+            tracing::debug!(
+                "[Discogs]   #{}: title='{}', year={:?}, score={}",
+                i + 1, result.title.as_deref().unwrap_or("Unknown"), result.year, score
             );
         }
 
@@ -255,10 +252,10 @@ impl DiscogsClient {
         let metadata = self.get_release_details(best_result.id, query).await?;
 
         tracing::info!(
-            "[Discogs] Selected: artist={:?}, title={:?}, album={:?}, year={:?}",
-            metadata.artist,
-            metadata.title,
-            metadata.album,
+            "[Discogs] Selected: '{} - {}' on '{}' ({:?})",
+            metadata.artist.as_deref().unwrap_or("?"),
+            metadata.title.as_deref().unwrap_or("?"),
+            metadata.album.as_deref().unwrap_or("?"),
             metadata.year
         );
 
@@ -271,33 +268,28 @@ impl DiscogsClient {
         artist: &str,
         title: &str,
     ) -> Result<TrackMetadata> {
-        tracing::info!(
-            "[Discogs] Precise search: artist='{}', title='{}'",
-            artist,
-            title
-        );
+        tracing::debug!("[Discogs] Precise search: artist='{}', title='{}'", artist, title);
 
         // Build query with artist and track
         let query = format!("{} {}", artist, title);
 
-        let mut url = format!(
-            "https://api.discogs.com/database/search?q={}&type=release&per_page=10",
-            urlencoding::encode(&query)
+        let url = format!(
+            "https://api.discogs.com/database/search?q={}&type=release&per_page=10&artist={}",
+            urlencoding::encode(&query),
+            urlencoding::encode(artist)
         );
 
-        // Add artist filter if available
-        url.push_str(&format!("&artist={}", urlencoding::encode(artist)));
-
-        // Add token if available
-        if let Some(ref token) = self.token {
-            url.push_str(&format!("&token={}", token));
-        }
-
-        let response = self
+        let mut request = self
             .http_client
             .get(&url)
             .header("User-Agent", &self.user_agent)
-            .header("Accept", "application/json")
+            .header("Accept", "application/json");
+
+        if let Some(ref token) = self.token {
+            request = request.header("Authorization", format!("Discogs token={}", token));
+        }
+
+        let response = request
             .send()
             .await
             .context("Failed to send Discogs request")?;
@@ -324,7 +316,7 @@ impl DiscogsClient {
                 anyhow::anyhow!("No results found for artist='{}', title='{}'", artist, title)
             })?;
 
-        tracing::info!("[Discogs] Precise search returned {} results", results.len());
+        tracing::info!("[Discogs] Precise search: '{} {}' -> {} results", artist, title, results.len());
 
         // Score with combined query
         let best_result = self.select_best_match(&query, results)
@@ -336,10 +328,10 @@ impl DiscogsClient {
         let metadata = self.get_release_details(best_result.id, &query).await?;
 
         tracing::info!(
-            "[Discogs] Precise search result: artist={:?}, title={:?}, album={:?}, year={:?}",
-            metadata.artist,
-            metadata.title,
-            metadata.album,
+            "[Discogs] Selected: '{} - {}' on '{}' ({:?})",
+            metadata.artist.as_deref().unwrap_or("?"),
+            metadata.title.as_deref().unwrap_or("?"),
+            metadata.album.as_deref().unwrap_or("?"),
             metadata.year
         );
 
@@ -351,17 +343,19 @@ impl DiscogsClient {
         let start = std::time::Instant::now();
         tracing::debug!("[Discogs] Fetching release details for ID: {}", release_id);
 
-        let mut url = format!("https://api.discogs.com/releases/{}", release_id);
+        let url = format!("https://api.discogs.com/releases/{}", release_id);
 
-        if let Some(ref token) = self.token {
-            url.push_str(&format!("?token={}", token));
-        }
-
-        let response = self
+        let mut request = self
             .http_client
             .get(&url)
             .header("User-Agent", &self.user_agent)
-            .header("Accept", "application/json")
+            .header("Accept", "application/json");
+
+        if let Some(ref token) = self.token {
+            request = request.header("Authorization", format!("Discogs token={}", token));
+        }
+
+        let response = request
             .send()
             .await
             .context("Failed to fetch Discogs release details")?;
@@ -458,11 +452,9 @@ impl DiscogsClient {
             }
         }
 
-        tracing::info!(
-            "[Discogs] Best match is #{} with score {} (threshold: {})",
-            best_idx + 1,
-            best_score,
-            Self::MIN_MATCH_SCORE
+        tracing::debug!(
+            "[Discogs] Best match: #{} score={} (threshold={})",
+            best_idx + 1, best_score, Self::MIN_MATCH_SCORE
         );
 
         if best_score < Self::MIN_MATCH_SCORE {

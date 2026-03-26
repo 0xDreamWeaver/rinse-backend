@@ -357,14 +357,14 @@ pub fn find_best_files(
     candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
     if !candidates.is_empty() {
-        tracing::info!("[FileSelection] Found {} candidates matching '{}'", candidates.len(), query);
+        tracing::debug!("[FileSelection] Found {} candidates matching '{}'", candidates.len(), query);
 
         // Log top 5 candidates
         for (i, c) in candidates.iter().take(5).enumerate() {
             let ext = c.filename.rsplit('.').next().unwrap_or("?");
             let size_mb = c.size as f64 / 1_048_576.0;
             let bitrate_str = c.bitrate.map(|b| format!("{}kbps", b)).unwrap_or_else(|| "?".to_string());
-            tracing::info!(
+            tracing::debug!(
                 "[FileSelection] #{}: {:.1} pts - {} ({}, {:.1}MB, {}) from '{}' ({:.0}KB/s)",
                 i + 1,
                 c.score,
