@@ -207,6 +207,37 @@ pub enum WsEvent {
         incoming: bool,
         is_new: bool,
     },
+
+    // ========================================================================
+    // Local chat events
+    // ========================================================================
+
+    /// Local chat message sent by a user
+    LocalChatMessage {
+        id: i64,
+        user_id: i64,
+        username: String,
+        display_name: Option<String>,
+        has_avatar: bool,
+        message: String,
+        created_at: String,
+    },
+
+    // ========================================================================
+    // Direct message events
+    // ========================================================================
+
+    /// Direct message sent between users
+    DirectMessage {
+        id: i64,
+        sender_id: i64,
+        sender_username: String,
+        sender_display_name: Option<String>,
+        sender_has_avatar: bool,
+        recipient_id: i64,
+        message: String,
+        created_at: String,
+    },
 }
 
 /// Query params for WebSocket connection

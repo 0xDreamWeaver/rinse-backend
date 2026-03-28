@@ -675,6 +675,73 @@ impl From<FailedImportTrack> for FailedTrackResponse {
     }
 }
 
+// ============================================================================
+// Local Chat Models
+// ============================================================================
+
+/// Local chat message row (joined with users table)
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct LocalChatRow {
+    pub id: i64,
+    pub user_id: i64,
+    pub username: String,
+    pub display_name: Option<String>,
+    pub has_avatar: bool,
+    pub message: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Share search result row for /share command
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct ShareSearchRow {
+    pub id: i64,
+    pub filename: String,
+    pub meta_title: Option<String>,
+    pub meta_artist: Option<String>,
+    pub meta_album_art_url: Option<String>,
+    pub meta_duration_ms: Option<i64>,
+}
+
+// ============================================================================
+// Direct Message Models
+// ============================================================================
+
+/// Direct message row (joined with users table for sender/recipient info)
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct DirectMessageRow {
+    pub id: i64,
+    pub sender_id: i64,
+    pub sender_username: String,
+    pub sender_display_name: Option<String>,
+    pub sender_has_avatar: bool,
+    pub recipient_id: i64,
+    pub recipient_username: String,
+    pub message: String,
+    pub read_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Conversation summary for the DM conversation list
+#[derive(Debug, Clone, Serialize)]
+pub struct DmConversationSummary {
+    pub user_id: i64,
+    pub username: String,
+    pub display_name: Option<String>,
+    pub has_avatar: bool,
+    pub last_message: String,
+    pub last_message_at: DateTime<Utc>,
+    pub unread_count: i64,
+}
+
+/// Lightweight user info for search picker
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct UserSummary {
+    pub id: i64,
+    pub username: String,
+    pub display_name: Option<String>,
+    pub has_avatar: bool,
+}
+
 /// External playlist response (from Spotify, etc.)
 #[derive(Debug, Serialize)]
 pub struct ExternalPlaylistResponse {

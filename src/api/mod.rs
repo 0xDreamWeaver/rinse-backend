@@ -3,8 +3,10 @@ mod attribution;
 mod auth;
 mod chat;
 mod cover;
+mod direct_messages;
 mod items;
 mod lists;
+mod local_chat;
 mod metadata;
 mod oauth;
 mod profile;
@@ -110,9 +112,23 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/sharing/stats", get(uploads::get_sharing_stats))
         .route("/api/sharing/rescan", post(uploads::rescan_shares))
 
-        // Chat routes (auth required - AuthUser extractor handles this)
+        // Soulseek chat routes (admin only - require_admin inside handlers)
         .route("/api/chat/messages", get(chat::get_messages))
         .route("/api/chat/send", post(chat::send_message))
+
+        // Local chat routes (auth required - AuthUser extractor handles this)
+        .route("/api/local-chat/messages", get(local_chat::get_messages))
+        .route("/api/local-chat/send", post(local_chat::send_message))
+        .route("/api/local-chat/search-items", get(local_chat::search_items))
+        .route("/api/local-chat/search-lists", get(local_chat::search_lists))
+
+        // Direct message routes (auth required - AuthUser extractor handles this)
+        .route("/api/direct-messages", get(direct_messages::get_conversations))
+        .route("/api/direct-messages/:user_id", get(direct_messages::get_thread).post(direct_messages::send_message))
+        .route("/api/direct-messages/:user_id/read", put(direct_messages::mark_read))
+
+        // User search (auth required - for DM user picker)
+        .route("/api/users/search", get(direct_messages::search_users))
 
         // WebSocket for download progress
         .route("/api/ws/progress", get(ws::progress_handler))

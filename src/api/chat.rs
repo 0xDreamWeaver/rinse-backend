@@ -3,10 +3,12 @@
 use axum::{
     extract::{State, Query},
     Json,
+    response::{IntoResponse, Response},
+    http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
 
-use super::{AppState, AuthUser};
+use super::{AppState, AuthUser, require_admin};
 
 /// Query params for filtering chat messages
 #[derive(Deserialize)]
@@ -32,12 +34,13 @@ pub struct SendMessageRequest {
     pub message: String,
 }
 
-/// GET /api/chat/messages - Get recent chat history
+/// GET /api/chat/messages - Get recent chat history (admin only)
 pub async fn get_messages(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Query(query): Query<ChatQuery>,
-) -> Json<Vec<ChatMessageResponse>> {
+) -> Result<Json<Vec<ChatMessageResponse>>, Response> {
+    require_admin(&auth)?;
     let history = state.slsk_client.router().get_chat_history().await;
 
     let messages: Vec<ChatMessageResponse> = history
@@ -58,20 +61,18 @@ pub async fn get_messages(
         })
         .collect();
 
-    Json(messages)
+    Ok(Json(messages))
 }
 
-/// POST /api/chat/send - Send a private message
+/// POST /api/chat/send - Send a private message (admin only)
 pub async fn send_message(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Json(req): Json<SendMessageRequest>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, Response> {
+    require_admin(&auth)?;
     if req.username.is_empty() || req.message.is_empty() {
-        return Err((
-            axum::http::StatusCode::BAD_REQUEST,
-            "Username and message are required".to_string(),
-        ));
+        return Err((StatusCode::BAD_REQUEST, "Username and message are required".to_string()).into_response());
     }
 
     state
@@ -80,10 +81,7 @@ pub async fn send_message(
         .send_private_message(&req.username, &req.message)
         .await
         .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to send message: {}", e),
-            )
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to send message: {}", e)).into_response()
         })?;
 
     Ok(Json(serde_json::json!({

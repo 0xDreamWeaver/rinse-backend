@@ -2109,4 +2109,334 @@ impl Database {
 
         Ok(tracks)
     }
+
+    // ========================================================================
+    // Local Chat methods
+    // ========================================================================
+
+    /// Insert a local chat message and return its ID
+    pub async fn insert_local_chat_message(&self, user_id: i64, message: &str) -> Result<i64> {
+        let row = sqlx::query(
+            "INSERT INTO local_chat_messages (user_id, message) VALUES (?, ?) RETURNING id"
+        )
+        .bind(user_id)
+        .bind(message)
+        .fetch_one(&self.pool)
+        .await
+        .context("Failed to insert local chat message")?;
+
+        Ok(row.get("id"))
+    }
+
+    /// Get local chat messages with user info, cursor-based pagination via before_id
+    pub async fn get_local_chat_messages(&self, limit: i64, before_id: Option<i64>) -> Result<Vec<LocalChatRow>> {
+        let messages = if let Some(before) = before_id {
+            sqlx::query_as::<_, LocalChatRow>(
+                r#"
+                SELECT m.id, m.user_id, u.username, u.display_name,
+                       CASE WHEN u.avatar_path IS NOT NULL THEN 1 ELSE 0 END as has_avatar,
+                       m.message, m.created_at
+                FROM local_chat_messages m
+                JOIN users u ON m.user_id = u.id
+                WHERE m.id < ?
+                ORDER BY m.id DESC
+                LIMIT ?
+                "#
+            )
+            .bind(before)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .context("Failed to get local chat messages")?
+        } else {
+            sqlx::query_as::<_, LocalChatRow>(
+                r#"
+                SELECT m.id, m.user_id, u.username, u.display_name,
+                       CASE WHEN u.avatar_path IS NOT NULL THEN 1 ELSE 0 END as has_avatar,
+                       m.message, m.created_at
+                FROM local_chat_messages m
+                JOIN users u ON m.user_id = u.id
+                ORDER BY m.id DESC
+                LIMIT ?
+                "#
+            )
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .context("Failed to get local chat messages")?
+        };
+
+        Ok(messages)
+    }
+
+    /// Get a single local chat message by ID (with user info)
+    pub async fn get_local_chat_message(&self, id: i64) -> Result<Option<LocalChatRow>> {
+        let message = sqlx::query_as::<_, LocalChatRow>(
+            r#"
+            SELECT m.id, m.user_id, u.username, u.display_name,
+                   CASE WHEN u.avatar_path IS NOT NULL THEN 1 ELSE 0 END as has_avatar,
+                   m.message, m.created_at
+            FROM local_chat_messages m
+            JOIN users u ON m.user_id = u.id
+            WHERE m.id = ?
+            "#
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to get local chat message")?;
+
+        Ok(message)
+    }
+
+    /// Search completed items for /share command
+    pub async fn search_items_for_share(&self, query: &str, limit: i64) -> Result<Vec<ShareSearchRow>> {
+        let pattern = format!("%{}%", query);
+        let items = sqlx::query_as::<_, ShareSearchRow>(
+            r#"
+            SELECT id, filename, meta_title, meta_artist, meta_album_art_url, meta_duration_ms
+            FROM items
+            WHERE download_status = 'completed'
+              AND (meta_title LIKE ? OR meta_artist LIKE ? OR filename LIKE ?)
+            ORDER BY
+              CASE WHEN meta_title LIKE ? THEN 0 ELSE 1 END,
+              CASE WHEN meta_artist LIKE ? THEN 0 ELSE 1 END,
+              id DESC
+            LIMIT ?
+            "#
+        )
+        .bind(&pattern)
+        .bind(&pattern)
+        .bind(&pattern)
+        .bind(&pattern)
+        .bind(&pattern)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to search items for share")?;
+
+        Ok(items)
+    }
+
+    /// Search user's lists by name for sharing in chat
+    pub async fn search_user_lists(&self, user_id: i64, query: &str, limit: i64) -> Result<Vec<List>> {
+        let pattern = format!("%{}%", query);
+        let lists = sqlx::query_as::<_, List>(
+            r#"
+            SELECT id, name, user_id, status, total_items, completed_items, failed_items, created_at, completed_at
+            FROM lists
+            WHERE user_id = ? AND name LIKE ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            "#
+        )
+        .bind(user_id)
+        .bind(&pattern)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to search user lists")?;
+
+        Ok(lists)
+    }
+
+    // ========================================================================
+    // Direct Messages
+    // ========================================================================
+
+    /// Insert a direct message and return its ID
+    pub async fn insert_direct_message(&self, sender_id: i64, recipient_id: i64, message: &str) -> Result<i64> {
+        let row = sqlx::query(
+            "INSERT INTO direct_messages (sender_id, recipient_id, message) VALUES (?, ?, ?) RETURNING id"
+        )
+        .bind(sender_id)
+        .bind(recipient_id)
+        .bind(message)
+        .fetch_one(&self.pool)
+        .await
+        .context("Failed to insert direct message")?;
+
+        Ok(row.get("id"))
+    }
+
+    /// Get a single direct message by ID (with sender/recipient info)
+    pub async fn get_direct_message(&self, id: i64) -> Result<Option<DirectMessageRow>> {
+        let message = sqlx::query_as::<_, DirectMessageRow>(
+            r#"
+            SELECT dm.id, dm.sender_id,
+                   s.username as sender_username,
+                   s.display_name as sender_display_name,
+                   CASE WHEN s.avatar_path IS NOT NULL THEN 1 ELSE 0 END as sender_has_avatar,
+                   dm.recipient_id,
+                   r.username as recipient_username,
+                   dm.message, dm.read_at, dm.created_at
+            FROM direct_messages dm
+            JOIN users s ON dm.sender_id = s.id
+            JOIN users r ON dm.recipient_id = r.id
+            WHERE dm.id = ?
+            "#
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to get direct message")?;
+
+        Ok(message)
+    }
+
+    /// Get messages between two users, cursor-paginated (newest first)
+    pub async fn get_dm_thread(&self, user_a: i64, user_b: i64, limit: i64, before_id: Option<i64>) -> Result<Vec<DirectMessageRow>> {
+        let messages = if let Some(before) = before_id {
+            sqlx::query_as::<_, DirectMessageRow>(
+                r#"
+                SELECT dm.id, dm.sender_id,
+                       s.username as sender_username,
+                       s.display_name as sender_display_name,
+                       CASE WHEN s.avatar_path IS NOT NULL THEN 1 ELSE 0 END as sender_has_avatar,
+                       dm.recipient_id,
+                       r.username as recipient_username,
+                       dm.message, dm.read_at, dm.created_at
+                FROM direct_messages dm
+                JOIN users s ON dm.sender_id = s.id
+                JOIN users r ON dm.recipient_id = r.id
+                WHERE ((dm.sender_id = ? AND dm.recipient_id = ?)
+                    OR (dm.sender_id = ? AND dm.recipient_id = ?))
+                  AND dm.id < ?
+                ORDER BY dm.id DESC
+                LIMIT ?
+                "#
+            )
+            .bind(user_a)
+            .bind(user_b)
+            .bind(user_b)
+            .bind(user_a)
+            .bind(before)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .context("Failed to get DM thread")?
+        } else {
+            sqlx::query_as::<_, DirectMessageRow>(
+                r#"
+                SELECT dm.id, dm.sender_id,
+                       s.username as sender_username,
+                       s.display_name as sender_display_name,
+                       CASE WHEN s.avatar_path IS NOT NULL THEN 1 ELSE 0 END as sender_has_avatar,
+                       dm.recipient_id,
+                       r.username as recipient_username,
+                       dm.message, dm.read_at, dm.created_at
+                FROM direct_messages dm
+                JOIN users s ON dm.sender_id = s.id
+                JOIN users r ON dm.recipient_id = r.id
+                WHERE (dm.sender_id = ? AND dm.recipient_id = ?)
+                   OR (dm.sender_id = ? AND dm.recipient_id = ?)
+                ORDER BY dm.id DESC
+                LIMIT ?
+                "#
+            )
+            .bind(user_a)
+            .bind(user_b)
+            .bind(user_b)
+            .bind(user_a)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .context("Failed to get DM thread")?
+        };
+
+        Ok(messages)
+    }
+
+    /// Get all DM conversations for a user, sorted by most recent message
+    pub async fn get_dm_conversations(&self, user_id: i64) -> Result<Vec<DmConversationSummary>> {
+        // Use a CTE to get the latest message per conversation partner
+        let rows = sqlx::query(
+            r#"
+            WITH conversation_partners AS (
+                SELECT
+                    CASE WHEN sender_id = ? THEN recipient_id ELSE sender_id END as other_user_id,
+                    MAX(id) as last_message_id
+                FROM direct_messages
+                WHERE sender_id = ? OR recipient_id = ?
+                GROUP BY other_user_id
+            )
+            SELECT
+                cp.other_user_id as user_id,
+                u.username,
+                u.display_name,
+                CASE WHEN u.avatar_path IS NOT NULL THEN 1 ELSE 0 END as has_avatar,
+                dm.message as last_message,
+                dm.created_at as last_message_at,
+                (SELECT COUNT(*) FROM direct_messages
+                 WHERE sender_id = cp.other_user_id AND recipient_id = ? AND read_at IS NULL
+                ) as unread_count
+            FROM conversation_partners cp
+            JOIN users u ON cp.other_user_id = u.id
+            JOIN direct_messages dm ON dm.id = cp.last_message_id
+            ORDER BY dm.created_at DESC
+            "#
+        )
+        .bind(user_id)
+        .bind(user_id)
+        .bind(user_id)
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to get DM conversations")?;
+
+        let conversations = rows.iter().map(|row| {
+            DmConversationSummary {
+                user_id: row.get("user_id"),
+                username: row.get("username"),
+                display_name: row.get("display_name"),
+                has_avatar: row.get::<bool, _>("has_avatar"),
+                last_message: row.get("last_message"),
+                last_message_at: row.get("last_message_at"),
+                unread_count: row.get("unread_count"),
+            }
+        }).collect();
+
+        Ok(conversations)
+    }
+
+    /// Mark all messages from a sender to a reader as read
+    pub async fn mark_dms_read(&self, reader_id: i64, sender_id: i64) -> Result<()> {
+        sqlx::query(
+            "UPDATE direct_messages SET read_at = CURRENT_TIMESTAMP WHERE recipient_id = ? AND sender_id = ? AND read_at IS NULL"
+        )
+        .bind(reader_id)
+        .bind(sender_id)
+        .execute(&self.pool)
+        .await
+        .context("Failed to mark DMs as read")?;
+
+        Ok(())
+    }
+
+    /// Search users by username or display_name (for DM user picker)
+    pub async fn search_users(&self, query: &str, exclude_id: i64, limit: i64) -> Result<Vec<UserSummary>> {
+        let pattern = format!("%{}%", query);
+        let users = sqlx::query_as::<_, UserSummary>(
+            r#"
+            SELECT id, username, display_name,
+                   CASE WHEN avatar_path IS NOT NULL THEN 1 ELSE 0 END as has_avatar
+            FROM users
+            WHERE id != ? AND (username LIKE ? OR display_name LIKE ?)
+            ORDER BY
+              CASE WHEN username LIKE ? THEN 0 ELSE 1 END,
+              username ASC
+            LIMIT ?
+            "#
+        )
+        .bind(exclude_id)
+        .bind(&pattern)
+        .bind(&pattern)
+        .bind(&pattern)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .context("Failed to search users")?;
+
+        Ok(users)
+    }
 }
